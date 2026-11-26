@@ -1,0 +1,18 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Kanso 本地数据
+.kanso/
+*.db
+*.db-shm
+*.db-wal
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

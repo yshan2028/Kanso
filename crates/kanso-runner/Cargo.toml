@@ -1,0 +1,12 @@
+[package]
+name = "kanso-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+kanso-ci = { path = "../kanso-ci" }
+kanso-storage = { path = "../kanso-storage" }
+tokio.workspace = true
