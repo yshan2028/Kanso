@@ -5,7 +5,6 @@ pub mod model;
 pub mod ops;
 pub mod scanner;
 pub mod task;
-pub mod watcher;
 
 pub use commit::{
     batch_commit_and_push, commit_repo, detect_jj_version, detect_vcs_kind, enable_jj_colocated,
@@ -24,4 +23,3 @@ pub use scanner::{
     scan_workspace,
 };
 pub use task::{aggregate_tasks, detect_alerts};
-pub use watcher::WorkspaceWatcher;

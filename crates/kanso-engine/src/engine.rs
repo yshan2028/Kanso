@@ -32,7 +32,7 @@ struct RefreshJob {
 
 pub struct EngineHandle {
     tx: mpsc::Sender<ActorMsg>,
-    event_rx: mpsc::Receiver<EngineEvent>,
+    event_rx: Option<mpsc::Receiver<EngineEvent>>,
     actor_thread: Option<JoinHandle<()>>,
 }
 
@@ -44,7 +44,13 @@ impl EngineHandle {
     }
 
     pub fn events(&self) -> &mpsc::Receiver<EngineEvent> {
-        &self.event_rx
+        self.event_rx
+            .as_ref()
+            .expect("事件接收端已被 take_events 移走")
+    }
+
+    pub fn take_events(&mut self) -> Option<mpsc::Receiver<EngineEvent>> {
+        self.event_rx.take()
     }
 
     pub fn shutdown(mut self) {
@@ -279,7 +285,7 @@ pub fn start(cfg: EngineConfig) -> Result<EngineHandle> {
 
     Ok(EngineHandle {
         tx: actor_tx,
-        event_rx,
+        event_rx: Some(event_rx),
         actor_thread: Some(actor_thread),
     })
 }
