@@ -366,4 +366,46 @@ mod tests {
         db.remove_workspace(&ws.id).expect("remove workspace");
         assert!(db.list_workspaces().unwrap().is_empty());
     }
+
+    #[test]
+    fn workspace_add_is_idempotent_and_ci_runs_order_by_latest() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = StorageDb::open(&dir.path().join("kanso.db")).expect("open db");
+
+        let ws_dir = dir.path().join("repo");
+        fs::create_dir_all(&ws_dir).unwrap();
+        let first = db
+            .add_workspace("repo", ws_dir.to_str().unwrap(), None)
+            .expect("first add");
+        let second = db
+            .add_workspace("repo-dup", ws_dir.to_str().unwrap(), Some("main"))
+            .expect("second add");
+        assert_eq!(first.id, second.id);
+        assert_eq!(db.list_workspaces().unwrap().len(), 1);
+
+        db.insert_ci_run(NewCiRun {
+            id: "r1".to_string(),
+            workspace_id: first.id.clone(),
+            repo_path: ws_dir.to_string_lossy().to_string(),
+            pipeline_name: "Old".to_string(),
+            command: "echo 1".to_string(),
+            started_at: 100,
+        })
+        .unwrap();
+        db.insert_ci_run(NewCiRun {
+            id: "r2".to_string(),
+            workspace_id: first.id.clone(),
+            repo_path: ws_dir.to_string_lossy().to_string(),
+            pipeline_name: "New".to_string(),
+            command: "echo 2".to_string(),
+            started_at: 200,
+        })
+        .unwrap();
+
+        let runs = db
+            .list_ci_runs(Some(ws_dir.to_str().unwrap()), 1)
+            .expect("limit 1");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "r2");
+    }
 }

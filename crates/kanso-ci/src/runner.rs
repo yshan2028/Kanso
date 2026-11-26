@@ -270,4 +270,70 @@ mod tests {
         }
         assert!(received.iter().any(|e| e.line.contains("hello-kanso")));
     }
+
+    #[tokio::test]
+    async fn local_runner_supports_cancellation() {
+        let dir = TempDir::new().unwrap();
+        let runner = LocalCiRunner;
+        let pipeline = PipelineDefinition {
+            name: "Long Sleep".to_string(),
+            source: "test".to_string(),
+            steps: vec![PipelineStep {
+                name: "Wait".to_string(),
+                command: "sleep 20".to_string(),
+                working_dir: None,
+            }],
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let _ = cancel_tx.send(());
+        });
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            runner.run_pipeline("run-cancel", dir.path(), &pipeline, tx, cancel_rx),
+        )
+        .await
+        .expect("cancel finished promptly")
+        .expect("run pipeline");
+
+        assert_eq!(outcome.status, "cancelled");
+        assert!(outcome.full_log.contains("cancelled"));
+    }
+
+    #[test]
+    fn discovers_kanso_yaml_and_polyglot_stacks() {
+        let yaml_dir = TempDir::new().unwrap();
+        fs::write(
+            yaml_dir.path().join(".kanso.yaml"),
+            "pipelines:\n  - name: Custom\n    steps:\n      - name: Echo\n        command: echo ok\n",
+        )
+        .unwrap();
+        fs::write(yaml_dir.path().join("pom.xml"), "<project/>").unwrap();
+        let yaml_pipes = discover_pipelines(yaml_dir.path());
+        assert_eq!(yaml_pipes.len(), 1);
+        assert_eq!(yaml_pipes[0].source, ".kanso.yaml");
+
+        let maven_dir = TempDir::new().unwrap();
+        fs::write(maven_dir.path().join("pom.xml"), "<project/>").unwrap();
+        assert_eq!(discover_pipelines(maven_dir.path())[0].source, "auto:pom.xml");
+
+        let node_dir = TempDir::new().unwrap();
+        fs::write(node_dir.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        fs::write(
+            node_dir.path().join("package.json"),
+            r#"{"scripts":{"typecheck":"tsc --noEmit","build":"vite build"}}"#,
+        )
+        .unwrap();
+        let node_pipes = discover_pipelines(node_dir.path());
+        assert_eq!(node_pipes[0].steps[0].command, "pnpm typecheck");
+        assert_eq!(node_pipes[0].steps[1].command, "pnpm build");
+
+        let go_dir = TempDir::new().unwrap();
+        fs::write(go_dir.path().join("go.mod"), "module example.com/demo\n").unwrap();
+        assert_eq!(discover_pipelines(go_dir.path())[0].source, "auto:go.mod");
+    }
 }

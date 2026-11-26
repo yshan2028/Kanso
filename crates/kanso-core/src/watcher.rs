@@ -56,3 +56,42 @@ impl WorkspaceWatcher {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tempfile::TempDir;
+
+    #[test]
+    fn should_ignore_path_filters_noise_and_watcher_detects_changes() {
+        assert!(should_ignore_path(Path::new("/repo/.git/objects/ab/cd")));
+        assert!(should_ignore_path(Path::new("/repo/node_modules/pkg/index.js")));
+        assert!(should_ignore_path(Path::new("/repo/target/debug/app")));
+        assert!(should_ignore_path(Path::new("/ws/.kanso/kanso.db")));
+        assert!(!should_ignore_path(Path::new("/repo/src/main.rs")));
+
+        let temp = TempDir::new().unwrap();
+        let triggered = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&triggered);
+
+        let _watcher = WorkspaceWatcher::start(temp.path(), move || {
+            flag.store(true, Ordering::Relaxed);
+        })
+        .expect("start watcher");
+
+        std::thread::sleep(Duration::from_millis(100));
+        fs::write(temp.path().join("hello.rs"), "fn main() {}\n").unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if triggered.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(triggered.load(Ordering::Relaxed));
+    }
+}

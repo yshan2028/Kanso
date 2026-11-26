@@ -524,4 +524,66 @@ mod tests {
         assert_eq!(snapshot.alerts[0].repo_name, "web-admin");
         assert_eq!(snapshot.alerts[0].kind, GuardrailKind::DirtyTrunk);
     }
+
+    #[test]
+    fn scans_worktrees_kanso_yaml_and_detached_head() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+
+        fs::write(
+            root.join(".kanso.yaml"),
+            "trunk_branch: dev-Java\nignore_dirs:\n  - archive\n",
+        )
+        .unwrap();
+
+        let main_repo = root.join("core-service");
+        init_repo(&main_repo, "dev-Java");
+
+        // Linked worktree placed under workspace root
+        let wt_repo = root.join("core-service-wt");
+        git(
+            &main_repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "java/jv-200-test",
+                wt_repo.to_str().unwrap(),
+            ],
+        );
+
+        // Detached HEAD repo
+        let detached_repo = root.join("detached-service");
+        init_repo(&detached_repo, "dev-Java");
+        git(&detached_repo, &["checkout", "--detach", "HEAD"]);
+
+        // Ignored repo inside archive/
+        let ignored_repo = root.join("archive").join("legacy-repo");
+        init_repo(&ignored_repo, "main");
+
+        let workspace = WorkspaceConfig {
+            id: "ws-yaml".to_string(),
+            name: "yaml-ws".to_string(),
+            root_path: root.to_string_lossy().to_string(),
+            default_trunk: None,
+            ignore_dirs: Vec::new(),
+        };
+
+        let snapshot = scan_workspace(&workspace).expect("scan");
+        assert_eq!(snapshot.repos.len(), 3);
+        assert!(!snapshot.repos.iter().any(|r| r.name == "legacy-repo"));
+
+        let wt = snapshot
+            .repos
+            .iter()
+            .find(|r| r.name == "core-service-wt")
+            .expect("worktree repo");
+        assert!(wt.is_worktree);
+        assert_eq!(wt.trunk_branch.as_deref(), Some("dev-Java"));
+        assert_eq!(wt.worktrees.len(), 2);
+
+        assert!(snapshot.alerts.iter().any(|a| {
+            a.repo_name == "detached-service" && a.kind == GuardrailKind::DetachedHead
+        }));
+    }
 }

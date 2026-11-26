@@ -220,4 +220,103 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "fix/ai-rescue");
         assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "dirty\n");
     }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_simple_repo(dir: &Path, branch: &str) {
+        fs::create_dir_all(dir).expect("mkdir");
+        git_ok(dir, &["init", "-b", branch]);
+        git_ok(dir, &["config", "user.name", "Test"]);
+        git_ok(dir, &["config", "user.email", "t@kanso.dev"]);
+        fs::write(dir.join("base.txt"), "v1\n").unwrap();
+        git_ok(dir, &["add", "."]);
+        git_ok(dir, &["commit", "-m", "init"]);
+    }
+
+    #[test]
+    fn batch_create_branch_handles_partial_failures() {
+        let temp = TempDir::new().expect("temp dir");
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        init_simple_repo(&repo_a, "main");
+        init_simple_repo(&repo_b, "main");
+
+        // Pre-create target branch in repo_b so repo_b fails while repo_a succeeds
+        git_ok(&repo_b, &["branch", "feat/multi"]);
+
+        let results = batch_create_branch(&[repo_a.clone(), repo_b.clone()], "feat/multi", None);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].success);
+        assert!(!results[1].success);
+        assert!(results[1].message.contains("already exists"));
+
+        let invalid = batch_create_branch(&[repo_a], "invalid branch name", None);
+        assert!(!invalid[0].success);
+    }
+
+    #[test]
+    fn batch_pull_trunk_updates_clean_trunk_and_skips_dirty_or_feature() {
+        let temp = TempDir::new().expect("temp dir");
+        let origin = temp.path().join("origin.git");
+        fs::create_dir_all(&origin).unwrap();
+        git_ok(&origin, &["init", "--bare", "-b", "main"]);
+
+        // Seed repo pushes initial + second commit to origin
+        let seed = temp.path().join("seed");
+        init_simple_repo(&seed, "main");
+        git_ok(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git_ok(&seed, &["push", "-u", "origin", "main"]);
+
+        // Clone clean trunk repo, dirty trunk repo, and feature branch repo before second commit
+        let clean_repo = temp.path().join("clean-repo");
+        let dirty_repo = temp.path().join("dirty-repo");
+        let feature_repo = temp.path().join("feature-repo");
+
+        for target in [&clean_repo, &dirty_repo, &feature_repo] {
+            let out = Command::new("git")
+                .args(["clone", origin.to_str().unwrap(), target.to_str().unwrap()])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            git_ok(target, &["config", "user.name", "Test"]);
+            git_ok(target, &["config", "user.email", "t@kanso.dev"]);
+        }
+
+        // Advance origin/main via seed
+        fs::write(seed.join("base.txt"), "v2\n").unwrap();
+        git_ok(&seed, &["add", "."]);
+        git_ok(&seed, &["commit", "-m", "v2"]);
+        git_ok(&seed, &["push", "origin", "main"]);
+
+        // Make dirty_repo dirty on main; switch feature_repo to feature branch
+        fs::write(dirty_repo.join("uncommitted.txt"), "wip\n").unwrap();
+        git_ok(&feature_repo, &["checkout", "-b", "feat/x"]);
+
+        let results = batch_pull_trunk(&[
+            (clean_repo.clone(), "main".to_string()),
+            (dirty_repo.clone(), "main".to_string()),
+            (feature_repo.clone(), "main".to_string()),
+        ]);
+
+        assert_eq!(results.len(), 3);
+        assert!(results[0].success);
+        assert_eq!(fs::read_to_string(clean_repo.join("base.txt")).unwrap(), "v2\n");
+        assert!(!results[1].success);
+        assert!(results[1].message.contains("uncommitted"));
+        assert!(!results[2].success);
+        assert!(results[2].message.contains("feat/x"));
+    }
 }
