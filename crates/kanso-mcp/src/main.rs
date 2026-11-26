@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use kanso_ci::{CiRunner, LocalCiRunner, PipelineDefinition, PipelineStep, discover_pipelines};
-use kanso_core::{WorkspaceConfig, scan_workspace};
+use kanso_core::{
+    CommitRequest, WorkspaceConfig, commit_repo, inspect_repo_changes, land_branch_to_trunk,
+    push_repo, scan_workspace,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -41,6 +44,30 @@ enum Commands {
         pipeline: Option<String>,
         #[arg(long)]
         command: Option<String>,
+    },
+    /// Inspect uncommitted file changes, preflight checks, and diff of a repository
+    Diff {
+        repo_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Commit changes (with preflight checks) via Git or Jujutsu and optionally push
+    Commit {
+        repo_dir: PathBuf,
+        #[arg(short = 'm', long)]
+        message: String,
+        #[arg(long)]
+        push: Option<String>,
+        #[arg(long)]
+        allow_large_files: bool,
+    },
+    /// Safely merge current feature branch into trunk
+    Land {
+        repo_dir: PathBuf,
+        #[arg(long)]
+        trunk: String,
+        #[arg(long)]
+        delete_source: bool,
     },
     /// Start stdio JSON-RPC 2.0 MCP Server for AI coding agents
     Mcp,
@@ -331,6 +358,67 @@ async fn handle_mcp_call(name: &str, args: &Value) -> Result<Value> {
                 "isError": outcome.status != "passed"
             }))
         }
+        "kanso_repo_changes" => {
+            let repo_path = args
+                .get("repoPath")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Missing required argument: repoPath"))?;
+            let cs = inspect_repo_changes(Path::new(repo_path))?;
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&cs)?
+                }]
+            }))
+        }
+        "kanso_commit_repo" => {
+            let repo_path = args
+                .get("repoPath")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Missing required argument: repoPath"))?;
+            let message = args
+                .get("message")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Missing required argument: message"))?
+                .to_string();
+            let author_name = args
+                .get("authorName")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let author_email = args
+                .get("authorEmail")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let push_remote = args
+                .get("pushRemote")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+
+            let commit_res = commit_repo(&CommitRequest {
+                repo_path: repo_path.to_string(),
+                message,
+                selected_files: Vec::new(),
+                author_name,
+                author_email,
+                allow_large_files: false,
+            })?;
+
+            let push_res = if let Some(remote) = push_remote {
+                Some(push_repo(Path::new(repo_path), &remote, None)?)
+            } else {
+                None
+            };
+
+            Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&json!({
+                        "commit": commit_res,
+                        "push": push_res
+                    }))?
+                }]
+            }))
+        }
         _ => Err(anyhow!("Unknown tool: {name}")),
     }
 }
@@ -431,6 +519,32 @@ async fn run_mcp_server() -> Result<()> {
                                 },
                                 "required": ["repoPath"]
                             }
+                        },
+                        {
+                            "name": "kanso_repo_changes",
+                            "description": "Inspect modified/untracked files, preflight guardrail checks, remotes, and diff of a Git or Jujutsu repository.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "repoPath": { "type": "string", "description": "Absolute path to repository" }
+                                },
+                                "required": ["repoPath"]
+                            }
+                        },
+                        {
+                            "name": "kanso_commit_repo",
+                            "description": "Run preflight checks, commit changes in a Git or Jujutsu repository, and optionally push to a remote.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "repoPath": { "type": "string", "description": "Absolute path to repository" },
+                                    "message": { "type": "string", "description": "Commit message" },
+                                    "pushRemote": { "type": "string", "description": "Optional remote name to push after commit (e.g. origin or forgejo)" },
+                                    "authorName": { "type": "string", "description": "Optional commit author name" },
+                                    "authorEmail": { "type": "string", "description": "Optional commit author email" }
+                                },
+                                "required": ["repoPath", "message"]
+                            }
                         }
                     ]
                 })),
@@ -479,6 +593,32 @@ async fn run_mcp_server() -> Result<()> {
     Ok(())
 }
 
+fn print_diff(repo_dir: &Path, json_out: bool) -> Result<()> {
+    let cs = inspect_repo_changes(repo_dir)?;
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&cs)?);
+        return Ok(());
+    }
+    println!(
+        "仓库: {} | 引擎: {:?} | 分支: {} | 远端: {:?}",
+        cs.repo_name, cs.vcs_kind, cs.current_branch, cs.remotes
+    );
+    println!("变更文件 ({}):", cs.files.len());
+    for f in &cs.files {
+        println!("  - [{:?}] {} ({} B)", f.status, f.path, f.size_bytes);
+    }
+    if !cs.preflight_issues.is_empty() {
+        println!("提交前安检提示:");
+        for issue in &cs.preflight_issues {
+            println!("  - [{}] {}: {}", issue.severity, issue.code, issue.message);
+        }
+    }
+    if !cs.diff_text.trim().is_empty() {
+        println!("\n{}", cs.diff_text);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -490,6 +630,37 @@ async fn main() -> Result<()> {
             pipeline,
             command,
         } => run_cli_ci(&repo_dir, pipeline, command).await,
+        Commands::Diff { repo_dir, json } => print_diff(&repo_dir, json),
+        Commands::Commit {
+            repo_dir,
+            message,
+            push,
+            allow_large_files,
+        } => {
+            let res = commit_repo(&CommitRequest {
+                repo_path: repo_dir.to_string_lossy().to_string(),
+                message,
+                selected_files: Vec::new(),
+                author_name: None,
+                author_email: None,
+                allow_large_files,
+            })?;
+            println!("{}", res.summary);
+            if let Some(remote) = push {
+                let push_res = push_repo(&repo_dir, &remote, None)?;
+                println!("{}", push_res.summary);
+            }
+            Ok(())
+        }
+        Commands::Land {
+            repo_dir,
+            trunk,
+            delete_source,
+        } => {
+            let res = land_branch_to_trunk(&repo_dir, &trunk, delete_source)?;
+            println!("{}", res.summary);
+            Ok(())
+        }
         Commands::Mcp => run_mcp_server().await,
     }
 }

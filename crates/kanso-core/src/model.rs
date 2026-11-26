@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VcsKind {
+    Git,
+    JjColocated,
+    Jj,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceConfig {
@@ -27,6 +35,7 @@ pub struct RepoStatus {
     pub name: String,
     pub path: String,
     pub relative_path: String,
+    pub vcs_kind: VcsKind,
     pub is_worktree: bool,
     pub current_branch: String,
     pub is_detached: bool,
@@ -34,6 +43,7 @@ pub struct RepoStatus {
     pub is_on_trunk: bool,
     pub has_dirty_on_trunk: bool,
     pub upstream: Option<String>,
+    pub remotes: Vec<String>,
     pub upstream_ahead: u32,
     pub upstream_behind: u32,
     pub trunk_ahead: u32,
@@ -57,6 +67,89 @@ impl RepoStatus {
     pub fn is_dirty(&self) -> bool {
         self.total_dirty() > 0
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FileChangeStatus {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChangeEntry {
+    pub path: String,
+    pub status: FileChangeStatus,
+    pub staged: bool,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitPreflightIssue {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoChangeset {
+    pub repo_path: String,
+    pub repo_name: String,
+    pub vcs_kind: VcsKind,
+    pub current_branch: String,
+    pub trunk_branch: Option<String>,
+    pub remotes: Vec<String>,
+    pub files: Vec<FileChangeEntry>,
+    pub diff_text: String,
+    pub preflight_issues: Vec<CommitPreflightIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitRequest {
+    pub repo_path: String,
+    pub message: String,
+    pub selected_files: Vec<String>,
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    pub allow_large_files: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitResult {
+    pub repo_path: String,
+    pub repo_name: String,
+    pub vcs_kind: VcsKind,
+    pub commit_hash: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushResult {
+    pub repo_path: String,
+    pub remote: String,
+    pub branch: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LandResult {
+    pub repo_path: String,
+    pub source_branch: String,
+    pub trunk_branch: String,
+    pub deleted_source: bool,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

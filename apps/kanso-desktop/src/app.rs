@@ -6,8 +6,11 @@ use iced::widget::{column, container, row, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 use kanso_ci::{CiRunner, LocalCiRunner, PipelineDefinition, PipelineStep, discover_pipelines};
 use kanso_core::{
-    BatchOpResult, GuardrailAlert, WorkspaceConfig, WorkspaceSnapshot, WorkspaceWatcher,
-    batch_create_branch, batch_pull_trunk, rescue_dirty_trunk, scan_workspace,
+    BatchOpResult, CommitRequest, CommitResult, GuardrailAlert, LandResult, PushResult,
+    RepoChangeset, WorkspaceConfig, WorkspaceSnapshot, WorkspaceWatcher, batch_commit_and_push,
+    batch_create_branch, batch_pull_trunk, commit_repo, detect_jj_version, enable_jj_colocated,
+    inspect_repo_changes, jj_undo, land_branch_to_trunk, push_repo, rescue_dirty_trunk,
+    scan_workspace,
 };
 use kanso_storage::{CiRunRecord, NewCiRun, StorageDb, WorkspaceRecord};
 use std::collections::{HashMap, HashSet};
@@ -21,6 +24,7 @@ use uuid::Uuid;
 pub enum NavTab {
     Radar,
     Tasks,
+    Commit,
     Ci,
 }
 
@@ -82,6 +86,21 @@ pub struct KansoApp {
     pub displayed_run_status: Option<String>,
     pub repo_latest_ci: HashMap<String, String>,
 
+    pub jj_version: Option<String>,
+    pub selected_commit_repo: Option<String>,
+    pub changeset: Option<RepoChangeset>,
+    pub commit_loading: bool,
+    pub selected_commit_files: HashSet<String>,
+    pub commit_message: String,
+    pub commit_allow_large: bool,
+    pub selected_push_remote: Option<String>,
+    pub land_require_ci_pass: bool,
+    pub land_delete_source: bool,
+
+    pub task_batch_commit_branch: Option<String>,
+    pub task_batch_commit_msg: String,
+    pub task_batch_push_remote: String,
+
     pub toast: Option<String>,
     pub copied_mcp: bool,
 }
@@ -140,6 +159,35 @@ pub enum Message {
     LoadCiHistoryLog(String),
     CiLogLoaded(Result<(String, String), String>),
 
+    OpenRepoCommit(String),
+    SelectCommitRepo(String),
+    RefreshChangeset,
+    ChangesetLoaded(Result<RepoChangeset, String>),
+    ToggleCommitFile(String),
+    ToggleAllCommitFiles,
+    CommitMessageChanged(String),
+    PrependCommitPrefix(String),
+    ToggleAllowLarge(bool),
+    SubmitCommit,
+    CommitDone(Result<CommitResult, String>),
+    SelectPushRemote(String),
+    SubmitPush,
+    PushDone(Result<PushResult, String>),
+    ToggleLandRequireCi(bool),
+    ToggleLandDeleteSource(bool),
+    SubmitLand,
+    LandDone(Result<LandResult, String>),
+    EnableJjColocated,
+    RunJjUndo,
+    JjOpDone(Result<String, String>),
+    CopyDiffText,
+
+    OpenTaskBatchCommit(String),
+    CancelTaskBatchCommit,
+    TaskBatchMsgChanged(String),
+    TaskBatchRemoteChanged(String),
+    SubmitTaskBatchCommit,
+
     CopyMcpConfig,
     McpCopied,
     ClearToast,
@@ -156,6 +204,7 @@ impl KansoApp {
         let workspaces = db.list_workspaces().unwrap_or_default();
         let active_workspace_id = workspaces.first().map(|w| w.id.clone());
         let repo_latest_ci = db.latest_ci_status_by_repo().unwrap_or_default();
+        let jj_version = detect_jj_version();
         let fs_dirty_flag = Arc::new(AtomicBool::new(false));
 
         let mut app = Self {
@@ -193,6 +242,19 @@ impl KansoApp {
             displayed_logs: Vec::new(),
             displayed_run_status: None,
             repo_latest_ci,
+            jj_version,
+            selected_commit_repo: None,
+            changeset: None,
+            commit_loading: false,
+            selected_commit_files: HashSet::new(),
+            commit_message: String::new(),
+            commit_allow_large: false,
+            selected_push_remote: None,
+            land_require_ci_pass: true,
+            land_delete_source: false,
+            task_batch_commit_branch: None,
+            task_batch_commit_msg: String::new(),
+            task_batch_push_remote: String::new(),
             toast: None,
             copied_mcp: false,
         };
@@ -259,6 +321,21 @@ impl KansoApp {
                     .map_err(|e| e.to_string())
             },
             Message::ScanCompleted,
+        )
+    }
+
+    fn spawn_load_changeset(&mut self, repo_path: &str) -> Task<Message> {
+        self.commit_loading = true;
+        let path = PathBuf::from(repo_path);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    inspect_repo_changes(&path).map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            },
+            Message::ChangesetLoaded,
         )
     }
 
@@ -417,6 +494,20 @@ impl KansoApp {
                         self.refresh_ci_repo_context();
                     }
                 }
+                if tab == NavTab::Commit {
+                    if let Some(target) = self.selected_commit_repo.clone().or_else(|| {
+                        self.snapshot.as_ref().and_then(|s| {
+                            s.repos
+                                .iter()
+                                .find(|r| r.is_dirty())
+                                .or_else(|| s.repos.first())
+                                .map(|r| r.path.clone())
+                        })
+                    }) {
+                        self.selected_commit_repo = Some(target.clone());
+                        return self.spawn_load_changeset(&target);
+                    }
+                }
                 Task::none()
             }
 
@@ -509,6 +600,8 @@ impl KansoApp {
                 self.selected_repo_paths.clear();
                 self.batch_results = None;
                 self.selected_ci_repo = None;
+                self.selected_commit_repo = None;
+                self.changeset = None;
                 self.restart_watcher(&id);
                 self.spawn_scan(&id)
             }
@@ -554,6 +647,19 @@ impl KansoApp {
                         } else if let Some(first) = snap.repos.first() {
                             self.selected_ci_repo = Some(first.path.clone());
                             self.refresh_ci_repo_context();
+                        }
+                        if self.selected_commit_repo.is_none()
+                            || !snap
+                                .repos
+                                .iter()
+                                .any(|r| Some(r.path.as_str()) == self.selected_commit_repo.as_deref())
+                        {
+                            self.selected_commit_repo = snap
+                                .repos
+                                .iter()
+                                .find(|r| r.is_dirty())
+                                .or_else(|| snap.repos.first())
+                                .map(|r| r.path.clone());
                         }
                         self.snapshot = Some(snap);
                     }
@@ -886,6 +992,354 @@ impl KansoApp {
                 Task::none()
             }
 
+            Message::OpenRepoCommit(path) => {
+                self.selected_commit_repo = Some(path.clone());
+                self.active_tab = NavTab::Commit;
+                self.spawn_load_changeset(&path)
+            }
+
+            Message::SelectCommitRepo(path) => {
+                self.selected_commit_repo = Some(path.clone());
+                self.spawn_load_changeset(&path)
+            }
+
+            Message::RefreshChangeset => {
+                if let Some(path) = self.selected_commit_repo.clone() {
+                    return self.spawn_load_changeset(&path);
+                }
+                Task::none()
+            }
+
+            Message::ChangesetLoaded(res) => {
+                self.commit_loading = false;
+                match res {
+                    Ok(cs) => {
+                        self.selected_commit_files =
+                            cs.files.iter().map(|f| f.path.clone()).collect();
+                        if self
+                            .selected_push_remote
+                            .as_deref()
+                            .is_none_or(|rm| !cs.remotes.iter().any(|r| r == rm))
+                        {
+                            self.selected_push_remote = cs.remotes.first().cloned();
+                        }
+                        self.changeset = Some(cs);
+                    }
+                    Err(err) => self.toast = Some(format!("读取仓库变更失败: {err}")),
+                }
+                Task::none()
+            }
+
+            Message::ToggleCommitFile(path) => {
+                if !self.selected_commit_files.remove(&path) {
+                    self.selected_commit_files.insert(path);
+                }
+                Task::none()
+            }
+
+            Message::ToggleAllCommitFiles => {
+                if let Some(cs) = &self.changeset {
+                    let all = !cs.files.is_empty()
+                        && cs
+                            .files
+                            .iter()
+                            .all(|f| self.selected_commit_files.contains(&f.path));
+                    if all {
+                        self.selected_commit_files.clear();
+                    } else {
+                        self.selected_commit_files =
+                            cs.files.iter().map(|f| f.path.clone()).collect();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::CommitMessageChanged(msg) => {
+                self.commit_message = msg;
+                Task::none()
+            }
+
+            Message::PrependCommitPrefix(prefix) => {
+                if !self.commit_message.starts_with(&prefix) {
+                    self.commit_message = format!("{prefix}{}", self.commit_message);
+                }
+                Task::none()
+            }
+
+            Message::ToggleAllowLarge(allow) => {
+                self.commit_allow_large = allow;
+                Task::none()
+            }
+
+            Message::SubmitCommit => {
+                let Some(repo_path) = self.selected_commit_repo.clone() else {
+                    return Task::none();
+                };
+                let selected_files: Vec<String> =
+                    self.selected_commit_files.iter().cloned().collect();
+                let req = CommitRequest {
+                    repo_path,
+                    message: self.commit_message.clone(),
+                    selected_files,
+                    author_name: None,
+                    author_email: None,
+                    allow_large_files: self.commit_allow_large,
+                };
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            commit_repo(&req).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::CommitDone,
+                )
+            }
+
+            Message::CommitDone(res) => match res {
+                Ok(out) => {
+                    self.commit_message.clear();
+                    self.toast = Some(out.summary);
+                    let mut tasks = Vec::new();
+                    tasks.push(self.spawn_load_changeset(&out.repo_path));
+                    if let Some(ws_id) = self.active_workspace_id.clone() {
+                        tasks.push(self.spawn_scan(&ws_id));
+                    }
+                    Task::batch(tasks)
+                }
+                Err(err) => {
+                    self.toast = Some(err);
+                    Task::none()
+                }
+            },
+
+            Message::SelectPushRemote(remote) => {
+                self.selected_push_remote = Some(remote);
+                Task::none()
+            }
+
+            Message::SubmitPush => {
+                let Some(repo_path) = self.selected_commit_repo.clone() else {
+                    return Task::none();
+                };
+                let Some(remote) = self.selected_push_remote.clone() else {
+                    self.toast = Some("请先选择远端仓库".to_string());
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            push_repo(Path::new(&repo_path), &remote, None)
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::PushDone,
+                )
+            }
+
+            Message::PushDone(res) => match res {
+                Ok(out) => {
+                    self.toast = Some(out.summary);
+                    if let Some(ws_id) = self.active_workspace_id.clone() {
+                        return self.spawn_scan(&ws_id);
+                    }
+                    Task::none()
+                }
+                Err(err) => {
+                    self.toast = Some(err);
+                    Task::none()
+                }
+            },
+
+            Message::ToggleLandRequireCi(v) => {
+                self.land_require_ci_pass = v;
+                Task::none()
+            }
+
+            Message::ToggleLandDeleteSource(v) => {
+                self.land_delete_source = v;
+                Task::none()
+            }
+
+            Message::SubmitLand => {
+                let Some(cs) = &self.changeset else {
+                    return Task::none();
+                };
+                let Some(trunk) = cs.trunk_branch.clone() else {
+                    self.toast = Some("未识别该仓库主干分支，请先设置工作区默认主干".to_string());
+                    return Task::none();
+                };
+                if self.land_require_ci_pass
+                    && self.repo_latest_ci.get(&cs.repo_path).map(String::as_str) != Some("passed")
+                {
+                    self.toast = Some(
+                        "已开启「CI 绿灯门禁」：请先通过本机 CI 验证后再合入主干".to_string(),
+                    );
+                    return Task::none();
+                }
+                let repo_path = cs.repo_path.clone();
+                let delete_source = self.land_delete_source;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            land_branch_to_trunk(Path::new(&repo_path), &trunk, delete_source)
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::LandDone,
+                )
+            }
+
+            Message::LandDone(res) => match res {
+                Ok(out) => {
+                    self.toast = Some(out.summary);
+                    let mut tasks = Vec::new();
+                    tasks.push(self.spawn_load_changeset(&out.repo_path));
+                    if let Some(ws_id) = self.active_workspace_id.clone() {
+                        tasks.push(self.spawn_scan(&ws_id));
+                    }
+                    Task::batch(tasks)
+                }
+                Err(err) => {
+                    self.toast = Some(err);
+                    Task::none()
+                }
+            },
+
+            Message::EnableJjColocated => {
+                let Some(repo_path) = self.selected_commit_repo.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            enable_jj_colocated(Path::new(&repo_path)).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::JjOpDone,
+                )
+            }
+
+            Message::RunJjUndo => {
+                let Some(repo_path) = self.selected_commit_repo.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            jj_undo(Path::new(&repo_path)).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::JjOpDone,
+                )
+            }
+
+            Message::JjOpDone(res) => match res {
+                Ok(msg) => {
+                    self.toast = Some(msg);
+                    let mut tasks = Vec::new();
+                    if let Some(path) = self.selected_commit_repo.clone() {
+                        tasks.push(self.spawn_load_changeset(&path));
+                    }
+                    if let Some(ws_id) = self.active_workspace_id.clone() {
+                        tasks.push(self.spawn_scan(&ws_id));
+                    }
+                    Task::batch(tasks)
+                }
+                Err(err) => {
+                    self.toast = Some(err);
+                    Task::none()
+                }
+            },
+
+            Message::CopyDiffText => {
+                let Some(cs) = &self.changeset else {
+                    return Task::none();
+                };
+                if cs.diff_text.trim().is_empty() {
+                    self.toast = Some("当前无 Diff 可复制".to_string());
+                    return Task::none();
+                }
+                self.toast = Some("已复制 Diff 到剪贴板".to_string());
+                iced::clipboard::write(cs.diff_text.clone())
+            }
+
+            Message::OpenTaskBatchCommit(branch) => {
+                self.task_batch_commit_branch = Some(branch);
+                self.task_batch_commit_msg.clear();
+                Task::none()
+            }
+
+            Message::CancelTaskBatchCommit => {
+                self.task_batch_commit_branch = None;
+                Task::none()
+            }
+
+            Message::TaskBatchMsgChanged(msg) => {
+                self.task_batch_commit_msg = msg;
+                Task::none()
+            }
+
+            Message::TaskBatchRemoteChanged(remote) => {
+                self.task_batch_push_remote = remote;
+                Task::none()
+            }
+
+            Message::SubmitTaskBatchCommit => {
+                let Some(branch) = self.task_batch_commit_branch.clone() else {
+                    return Task::none();
+                };
+                let Some(snap) = &self.snapshot else {
+                    return Task::none();
+                };
+                let msg = self.task_batch_commit_msg.trim().to_string();
+                if msg.is_empty() {
+                    self.toast = Some("跨仓提交说明不能为空".to_string());
+                    return Task::none();
+                }
+                let reqs: Vec<CommitRequest> = snap
+                    .repos
+                    .iter()
+                    .filter(|r| !r.is_on_trunk && r.current_branch == branch && r.is_dirty())
+                    .map(|r| CommitRequest {
+                        repo_path: r.path.clone(),
+                        message: msg.clone(),
+                        selected_files: Vec::new(),
+                        author_name: None,
+                        author_email: None,
+                        allow_large_files: false,
+                    })
+                    .collect();
+
+                if reqs.is_empty() {
+                    self.toast = Some("该任务下暂无需要提交的脏仓库".to_string());
+                    return Task::none();
+                }
+                let remote = self.task_batch_push_remote.trim().to_string();
+                let remote_opt = if remote.is_empty() { None } else { Some(remote) };
+                self.task_batch_commit_branch = None;
+
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            batch_commit_and_push(&reqs, remote_opt.as_deref())
+                        })
+                        .await
+                        .unwrap_or_default()
+                    },
+                    Message::BatchOpDone,
+                )
+            }
+
             Message::CopyMcpConfig => {
                 let snippet = serde_json::to_string_pretty(&serde_json::json!({
                     "mcpServers": {
@@ -925,6 +1379,7 @@ impl KansoApp {
         let body: Element<'_, Message> = match self.active_tab {
             NavTab::Radar => views::radar::view(self),
             NavTab::Tasks => views::tasks::view(self),
+            NavTab::Commit => views::commit::view(self),
             NavTab::Ci => views::ci::view(self),
         };
 

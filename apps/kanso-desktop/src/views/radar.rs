@@ -2,7 +2,7 @@ use crate::app::{FilterMode, KansoApp, Message};
 use crate::theme;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Color, Element, Font, Length};
-use kanso_core::{GuardrailAlert, GuardrailKind, RepoStatus};
+use kanso_core::{GuardrailAlert, GuardrailKind, RepoStatus, VcsKind};
 use std::collections::HashMap;
 
 pub fn view(app: &KansoApp) -> Element<'_, Message> {
@@ -288,7 +288,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
             text("远程同步").size(11).color(theme::TEXT_MUTED).width(Length::FillPortion(2)),
             text("工作区状态").size(11).color(theme::TEXT_MUTED).width(Length::FillPortion(2)),
             text("最近提交").size(11).color(theme::TEXT_MUTED).width(Length::FillPortion(4)),
-            text("操作").size(11).color(theme::TEXT_MUTED).width(120),
+            text("操作").size(11).color(theme::TEXT_MUTED).width(160),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -337,10 +337,17 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
             _ => "-".to_string(),
         };
 
-        let name_label = if repo.is_worktree {
-            format!("{} [WT]", repo.name)
-        } else {
+        let mut name_tags = Vec::new();
+        if repo.is_worktree {
+            name_tags.push("WT");
+        }
+        if matches!(repo.vcs_kind, VcsKind::JjColocated | VcsKind::Jj) {
+            name_tags.push("jj");
+        }
+        let name_label = if name_tags.is_empty() {
             repo.name.clone()
+        } else {
+            format!("{} [{}]", repo.name, name_tags.join("·"))
         };
 
         let row_card = container(
@@ -385,7 +392,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                     .color(theme::TEXT_SECONDARY)
                     .width(Length::FillPortion(4)),
                 {
-                    let mut actions = row![].spacing(4).width(120).align_y(Alignment::Center);
+                    let mut actions = row![].spacing(4).width(160).align_y(Alignment::Center);
                     if repo.has_dirty_on_trunk {
                         actions = actions.push(
                             button(text("救场").size(11))
@@ -398,6 +405,14 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                                     kind: GuardrailKind::DirtyTrunk,
                                 }))
                                 .style(theme::warning_btn_style)
+                                .padding([4, 7]),
+                        );
+                    }
+                    if repo.is_dirty() {
+                        actions = actions.push(
+                            button(text("提交").size(11))
+                                .on_press(Message::OpenRepoCommit(repo.path.clone()))
+                                .style(theme::primary_btn_style)
                                 .padding([4, 8]),
                         );
                     }
@@ -405,7 +420,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                         button(text("CI").size(11))
                             .on_press(Message::OpenRepoCi(repo.path.clone()))
                             .style(theme::secondary_btn_style)
-                            .padding([4, 10]),
+                            .padding([4, 8]),
                     );
                     actions
                 },

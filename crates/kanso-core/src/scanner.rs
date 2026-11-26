@@ -1,10 +1,11 @@
+use crate::commit::detect_vcs_kind;
 use crate::config::load_kanso_yaml;
-use crate::model::{RepoStatus, WorkspaceConfig, WorkspaceSnapshot, WorktreeEntry};
+use crate::model::{RepoStatus, VcsKind, WorkspaceConfig, WorkspaceSnapshot, WorktreeEntry};
 use crate::task::{aggregate_tasks, detect_alerts};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -81,9 +82,12 @@ impl GitCliBackend {
             .collect()
     }
 
-    fn resolve_trunk(&self, repo_path: &Path, preferred: Option<&str>) -> Option<(String, String)> {
-        let refs = self.list_refs(repo_path);
-
+    fn resolve_trunk(
+        &self,
+        repo_path: &Path,
+        preferred: Option<&str>,
+        refs: &HashSet<String>,
+    ) -> Option<(String, String)> {
         if let Some(pref) = preferred.map(str::trim).filter(|s| !s.is_empty()) {
             let local_ref = format!("refs/heads/{pref}");
             if refs.contains(&local_ref) {
@@ -125,6 +129,62 @@ impl GitCliBackend {
         }
 
         None
+    }
+
+    fn parse_remotes(&self, repo_path: &Path, refs: &HashSet<String>) -> Vec<String> {
+        let mut remotes = BTreeSet::new();
+        for r in refs {
+            if let Some(rest) = r.strip_prefix("refs/remotes/") {
+                if let Some((remote_name, _)) = rest.split_once('/') {
+                    remotes.insert(remote_name.to_string());
+                }
+            }
+        }
+
+        let dot_git = repo_path.join(".git");
+        let config_path = if dot_git.is_dir() {
+            Some(dot_git.join("config"))
+        } else if dot_git.is_file() {
+            fs::read_to_string(&dot_git).ok().and_then(|txt| {
+                let gitdir_raw = txt.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
+                let gitdir = if Path::new(gitdir_raw).is_absolute() {
+                    PathBuf::from(gitdir_raw)
+                } else {
+                    repo_path.join(gitdir_raw)
+                };
+                let common = fs::read_to_string(gitdir.join("commondir")).ok();
+                let base = match common {
+                    Some(rel) => {
+                        let p = Path::new(rel.trim());
+                        if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            gitdir.join(p)
+                        }
+                    }
+                    None => gitdir,
+                };
+                Some(base.join("config"))
+            })
+        } else {
+            None
+        };
+
+        if let Some(cfg_path) = config_path {
+            if let Ok(raw) = fs::read_to_string(cfg_path) {
+                for line in raw.lines() {
+                    let trimmed = line.trim();
+                    if let Some(inner) = trimmed
+                        .strip_prefix("[remote \"")
+                        .and_then(|s| s.strip_suffix("\"]"))
+                    {
+                        remotes.insert(inner.to_string());
+                    }
+                }
+            }
+        }
+
+        remotes.into_iter().collect()
     }
 
     fn list_worktrees(&self, repo_path: &Path) -> Vec<WorktreeEntry> {
@@ -198,6 +258,58 @@ impl VcsBackend for GitCliBackend {
         workspace_root: &Path,
         default_trunk: Option<&str>,
     ) -> Result<RepoStatus> {
+        let vcs_kind = detect_vcs_kind(repo_path);
+        if vcs_kind == VcsKind::Jj && !repo_path.join(".git").exists() {
+            let st_out = Command::new("jj")
+                .arg("-R")
+                .arg(repo_path)
+                .args(["diff", "--summary"])
+                .output()
+                .context("未安装 jj，无法读取纯 jj 仓库状态")?;
+            let modified_count = String::from_utf8_lossy(&st_out.stdout).lines().count() as u32;
+            let canonical_path = fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+            let canonical_root =
+                fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+            let relative_path = canonical_path
+                .strip_prefix(&canonical_root)
+                .map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_else(|_| canonical_path.to_string_lossy().to_string());
+            let name = canonical_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| relative_path.clone());
+            let path_str = canonical_path.to_string_lossy().to_string();
+            let id = blake3::hash(path_str.as_bytes()).to_hex()[..16].to_string();
+            return Ok(RepoStatus {
+                id,
+                name,
+                path: path_str,
+                relative_path,
+                vcs_kind,
+                is_worktree: false,
+                current_branch: "jj@".to_string(),
+                is_detached: false,
+                trunk_branch: default_trunk.map(str::to_string),
+                is_on_trunk: false,
+                has_dirty_on_trunk: false,
+                upstream: None,
+                remotes: Vec::new(),
+                upstream_ahead: 0,
+                upstream_behind: 0,
+                trunk_ahead: 0,
+                trunk_behind: 0,
+                staged_count: 0,
+                modified_count,
+                untracked_count: 0,
+                conflicted_count: 0,
+                last_commit_hash: None,
+                last_commit_message: None,
+                last_commit_author: None,
+                last_commit_timestamp: None,
+                worktrees: Vec::new(),
+            });
+        }
+
         let status_raw = self.run_git(repo_path, &["status", "--porcelain=v2", "--branch"])?;
 
         let mut current_branch = String::from("HEAD");
@@ -255,7 +367,9 @@ impl VcsBackend for GitCliBackend {
             .and_then(|cfg| cfg.trunk_branch.as_deref())
             .or(default_trunk);
 
-        let trunk_info = self.resolve_trunk(repo_path, preferred_trunk);
+        let refs = self.list_refs(repo_path);
+        let remotes = self.parse_remotes(repo_path, &refs);
+        let trunk_info = self.resolve_trunk(repo_path, preferred_trunk, &refs);
         let trunk_branch = trunk_info.as_ref().map(|(name, _)| name.clone());
         let is_on_trunk = !is_detached
             && trunk_branch
@@ -344,6 +458,7 @@ impl VcsBackend for GitCliBackend {
             name,
             path: path_str,
             relative_path,
+            vcs_kind,
             is_worktree,
             current_branch,
             is_detached,
@@ -351,6 +466,7 @@ impl VcsBackend for GitCliBackend {
             is_on_trunk,
             has_dirty_on_trunk,
             upstream,
+            remotes,
             upstream_ahead,
             upstream_behind,
             trunk_ahead,
@@ -368,7 +484,7 @@ impl VcsBackend for GitCliBackend {
     }
 }
 
-pub fn discover_git_repos(
+pub fn discover_repos(
     root: &Path,
     ignore_dirs: &[String],
     max_depth: usize,
@@ -402,7 +518,8 @@ fn walk_discover(
     }
 
     let dot_git = dir.join(".git");
-    if dot_git.exists() {
+    let dot_jj = dir.join(".jj");
+    if dot_git.exists() || dot_jj.exists() {
         out.push(dir.to_path_buf());
         return;
     }
@@ -448,7 +565,7 @@ pub fn scan_workspace(workspace: &WorkspaceConfig) -> Result<WorkspaceSnapshot> 
         }
     }
 
-    let repo_paths = discover_git_repos(&root, &ignore_dirs, DEFAULT_MAX_DEPTH);
+    let repo_paths = discover_repos(&root, &ignore_dirs, DEFAULT_MAX_DEPTH);
     let backend = GitCliBackend;
 
     let mut repos: Vec<RepoStatus> = repo_paths

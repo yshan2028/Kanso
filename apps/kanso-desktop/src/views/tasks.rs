@@ -1,6 +1,6 @@
 use crate::app::{KansoApp, Message};
 use crate::theme;
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Color, Element, Font, Length};
 use kanso_core::{RepoStatus, TaskStage};
 
@@ -117,6 +117,15 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                 );
             }
 
+            if repo.is_dirty() {
+                member_row = member_row.push(
+                    button(text("提交").size(11))
+                        .on_press(Message::OpenRepoCommit(repo.path.clone()))
+                        .style(theme::primary_btn_style)
+                        .padding([4, 9]),
+                );
+            }
+
             member_row = member_row
                 .push(text(dirty_text).size(11).color(dirty_color))
                 .push(
@@ -133,42 +142,91 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
             );
         }
 
-        let card = container(
-            column![
-                row![
-                    text(task.branch.as_str())
-                        .size(14)
-                        .font(Font::MONOSPACE)
-                        .color(theme::TEXT_PRIMARY),
-                    container(text("").size(1)).width(Length::Fill),
-                    container(text(stage_label).size(11).color(stage_color))
-                        .padding([3, 9])
-                        .style(theme::badge_style(stage_color)),
-                ]
-                .align_y(Alignment::Center),
-                row![
-                    text(format!(
-                        "涉及 {} 个仓库 · 脏仓 {} · 未推 {} · 落后主干 {}",
-                        task.total_repos,
-                        task.dirty_repos,
-                        task.unpushed_repos,
-                        task.behind_trunk_repos
-                    ))
+        let mut header_row = row![
+            text(task.branch.as_str())
+                .size(14)
+                .font(Font::MONOSPACE)
+                .color(theme::TEXT_PRIMARY),
+            container(text("").size(1)).width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        if task.dirty_repos > 0 {
+            header_row = header_row.push(
+                button(text(format!("跨仓批量提交 ({})", task.dirty_repos)).size(11))
+                    .on_press(Message::OpenTaskBatchCommit(task.branch.clone()))
+                    .style(theme::primary_btn_style)
+                    .padding([4, 10]),
+            );
+        }
+
+        header_row = header_row.push(
+            container(text(stage_label).size(11).color(stage_color))
+                .padding([3, 9])
+                .style(theme::badge_style(stage_color)),
+        );
+
+        let mut card_col = column![
+            header_row,
+            row![
+                text(format!(
+                    "涉及 {} 个仓库 · 脏仓 {} · 未推 {} · 落后主干 {}",
+                    task.total_repos,
+                    task.dirty_repos,
+                    task.unpushed_repos,
+                    task.behind_trunk_repos
+                ))
+                .size(11)
+                .color(theme::TEXT_MUTED),
+                container(text("").size(1)).width(Length::Fill),
+                text(format!("{}%", task.progress_percent))
                     .size(11)
-                    .color(theme::TEXT_MUTED),
-                    container(text("").size(1)).width(Length::Fill),
-                    text(format!("{}%", task.progress_percent))
-                        .size(11)
-                        .color(theme::TEXT_SECONDARY),
-                ],
-                bar_row,
-                member_list,
-            ]
-            .spacing(10),
-        )
-        .width(Length::Fill)
-        .padding(16)
-        .style(theme::card_style);
+                    .color(theme::TEXT_SECONDARY),
+            ],
+            bar_row,
+        ]
+        .spacing(10);
+
+        if app.task_batch_commit_branch.as_deref() == Some(task.branch.as_str()) {
+            let batch_box = container(
+                row![
+                    text_input("统一提交说明（如 feat(order): 联调完成）", &app.task_batch_commit_msg)
+                        .on_input(Message::TaskBatchMsgChanged)
+                        .on_submit(Message::SubmitTaskBatchCommit)
+                        .style(theme::input_style)
+                        .size(12)
+                        .padding([6, 10]),
+                    text_input("推送远端（可选，如 origin/forgejo）", &app.task_batch_push_remote)
+                        .on_input(Message::TaskBatchRemoteChanged)
+                        .on_submit(Message::SubmitTaskBatchCommit)
+                        .style(theme::input_style)
+                        .size(12)
+                        .width(200)
+                        .padding([6, 10]),
+                    button(text("提交并执行").size(11))
+                        .on_press(Message::SubmitTaskBatchCommit)
+                        .style(theme::primary_btn_style)
+                        .padding([6, 12]),
+                    button(text("取消").size(11))
+                        .on_press(Message::CancelTaskBatchCommit)
+                        .style(theme::secondary_btn_style)
+                        .padding([6, 10]),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .padding(10)
+            .style(theme::elevated_style);
+            card_col = card_col.push(batch_box);
+        }
+
+        card_col = card_col.push(member_list);
+
+        let card = container(card_col)
+            .width(Length::Fill)
+            .padding(16)
+            .style(theme::card_style);
 
         cards = cards.push(card);
     }

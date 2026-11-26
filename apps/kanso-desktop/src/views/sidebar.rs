@@ -7,6 +7,10 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
     let repo_count = app.snapshot.as_ref().map_or(0, |s| s.repos.len());
     let alert_count = app.snapshot.as_ref().map_or(0, |s| s.alerts.len());
     let task_count = app.snapshot.as_ref().map_or(0, |s| s.tasks.len());
+    let dirty_repo_count = app
+        .snapshot
+        .as_ref()
+        .map_or(0, |s| s.repos.iter().filter(|r| r.is_dirty()).count());
 
     let brand = container(
         row![
@@ -48,6 +52,16 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
             format!("{task_count}"),
             app.active_tab == NavTab::Tasks,
             NavTab::Tasks,
+        ),
+        nav_button(
+            "提交与交付",
+            if dirty_repo_count > 0 {
+                format!("{dirty_repo_count} 待提交")
+            } else {
+                String::new()
+            },
+            app.active_tab == NavTab::Commit,
+            NavTab::Commit,
         ),
         nav_button(
             "本机 CI 流水线",
@@ -183,6 +197,17 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                     text("渲染引擎").size(11).color(theme::TEXT_MUTED),
                     container(text("").size(1)).width(Length::Fill),
                     text("纯 Rust · Iced GPU").size(11).color(theme::ACCENT_GREEN),
+                ],
+                row![
+                    text("VCS 双引擎").size(11).color(theme::TEXT_MUTED),
+                    container(text("").size(1)).width(Length::Fill),
+                    text(if app.jj_version.is_some() {
+                        "Git + jj 就绪"
+                    } else {
+                        "Git (可扩展 jj)"
+                    })
+                    .size(11)
+                    .color(theme::TEXT_SECONDARY),
                 ],
                 row![
                     text("压缩底座").size(11).color(theme::TEXT_MUTED),
