@@ -1,3 +1,4 @@
+use crate::exec::GitAccess;
 use crate::model::{
     BatchOpResult, CommitPreflightIssue, CommitRequest, CommitResult, FileChangeEntry,
     FileChangeStatus, LandResult, PushResult, RepoChangeset, VcsKind,
@@ -6,17 +7,23 @@ use crate::scanner::GitCliBackend;
 use crate::scanner::VcsBackend;
 use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const MAX_NORMAL_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_DIFF_PREVIEW_BYTES: usize = 120 * 1024;
 
 pub fn detect_jj_version() -> Option<String> {
-    let out = Command::new("jj").arg("--version").output().ok()?;
-    if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let out = crate::exec::run_raw(
+        "jj",
+        &[OsString::from("--version")],
+        &[],
+        GitAccess::Read,
+    )
+    .ok()?;
+    if out.success {
+        Some(out.stdout.trim().to_string())
     } else {
         None
     }
@@ -238,13 +245,9 @@ pub fn inspect_repo_changes(repo_path: &Path) -> Result<RepoChangeset> {
     let status = backend.inspect_repo(&canonical, &canonical, None)?;
 
     let files = if vcs_kind == VcsKind::Jj && !canonical.join(".git").exists() {
-        let out = Command::new("jj")
-            .arg("-R")
-            .arg(&canonical)
-            .args(["diff", "--summary"])
-            .output()
+        let out = crate::exec::jj_output(&canonical, &["diff", "--summary"], GitAccess::Read)
             .context("执行 jj diff --summary 失败")?;
-        String::from_utf8_lossy(&out.stdout)
+        out.stdout
             .lines()
             .filter_map(|line| {
                 let mut parts = line.split_whitespace();
@@ -265,50 +268,39 @@ pub fn inspect_repo_changes(repo_path: &Path) -> Result<RepoChangeset> {
             })
             .collect()
     } else {
-        let raw_status = Command::new("git")
-            .arg("-C")
-            .arg(&canonical)
-            .args(["status", "--porcelain=v1", "-uall"])
-            .output()
-            .context("执行 git status 失败")?;
-        if !raw_status.status.success() {
-            return Err(anyhow!(
-                "读取仓库变更失败: {}",
-                String::from_utf8_lossy(&raw_status.stderr).trim()
-            ));
+        let raw_status = crate::exec::git_output(
+            &canonical,
+            &["status", "--porcelain=v1", "-uall"],
+            GitAccess::Read,
+        )
+        .context("执行 git status 失败")?;
+        if !raw_status.success {
+            return Err(anyhow!("读取仓库变更失败: {}", raw_status.stderr.trim()));
         }
-        parse_porcelain_status(&canonical, &String::from_utf8_lossy(&raw_status.stdout))
+        parse_porcelain_status(&canonical, &raw_status.stdout)
     };
 
     let mut diff_text = if vcs_kind == VcsKind::Jj && !canonical.join(".git").exists() {
-        let out = Command::new("jj")
-            .arg("-R")
-            .arg(&canonical)
-            .args(["diff", "--git"])
-            .output()
+        let out = crate::exec::jj_output(&canonical, &["diff", "--git"], GitAccess::Read)
             .context("执行 jj diff 失败")?;
-        String::from_utf8_lossy(&out.stdout).to_string()
+        out.stdout
     } else {
-        let head_exists = Command::new("git")
-            .arg("-C")
-            .arg(&canonical)
-            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let head_exists = crate::exec::git_output(
+            &canonical,
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            GitAccess::Read,
+        )
+        .map(|o| o.success)
+        .unwrap_or(false);
 
         let diff_args = if head_exists {
             vec!["diff", "HEAD"]
         } else {
             vec!["diff", "--cached"]
         };
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&canonical)
-            .args(&diff_args)
-            .output()
+        let out = crate::exec::git_output(&canonical, &diff_args, GitAccess::Read)
             .context("执行 git diff 失败")?;
-        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        let mut text = out.stdout;
         if text.len() > MAX_DIFF_PREVIEW_BYTES {
             text.truncate(MAX_DIFF_PREVIEW_BYTES);
             text.push_str("\n... (Diff 内容过长，已截断预览) ...\n");
@@ -377,41 +369,27 @@ pub fn commit_repo(req: &CommitRequest) -> Result<CommitResult> {
     if matches!(changeset.vcs_kind, VcsKind::Jj | VcsKind::JjColocated)
         && detect_jj_version().is_some()
     {
-        let desc = Command::new("jj")
-            .arg("-R")
-            .arg(repo_path)
-            .args(["describe", "-m", msg])
-            .output()
+        let desc = crate::exec::jj_output(repo_path, &["describe", "-m", msg], GitAccess::Write)
             .context("执行 jj describe 失败")?;
-        if !desc.status.success() {
-            return Err(anyhow!(
-                "jj describe 失败: {}",
-                String::from_utf8_lossy(&desc.stderr).trim()
-            ));
+        if !desc.success {
+            return Err(anyhow!("jj describe 失败: {}", desc.stderr.trim()));
         }
 
-        let new_cmd = Command::new("jj")
-            .arg("-R")
-            .arg(repo_path)
-            .arg("new")
-            .output()
+        let new_cmd = crate::exec::jj_output(repo_path, &["new"], GitAccess::Write)
             .context("执行 jj new 失败")?;
-        if !new_cmd.status.success() {
-            return Err(anyhow!(
-                "jj new 失败: {}",
-                String::from_utf8_lossy(&new_cmd.stderr).trim()
-            ));
+        if !new_cmd.success {
+            return Err(anyhow!("jj new 失败: {}", new_cmd.stderr.trim()));
         }
 
-        let rev = Command::new("jj")
-            .arg("-R")
-            .arg(repo_path)
-            .args(["log", "-r", "@-", "--no-graph", "-T", "change_id.short()"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "jj-change".to_string());
+        let rev = crate::exec::jj_output(
+            repo_path,
+            &["log", "-r", "@-", "--no-graph", "-T", "change_id.short()"],
+            GitAccess::Read,
+        )
+        .ok()
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "jj-change".to_string());
 
         return Ok(CommitResult {
             repo_path: changeset.repo_path,
@@ -423,69 +401,54 @@ pub fn commit_repo(req: &CommitRequest) -> Result<CommitResult> {
     }
 
     if req.selected_files.is_empty() {
-        let add_all = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["add", "-A"])
-            .output()
+        let add_all = crate::exec::git_output(repo_path, &["add", "-A"], GitAccess::Write)
             .context("执行 git add -A 失败")?;
-        if !add_all.status.success() {
-            return Err(anyhow!(
-                "git add 失败: {}",
-                String::from_utf8_lossy(&add_all.stderr).trim()
-            ));
+        if !add_all.success {
+            return Err(anyhow!("git add 失败: {}", add_all.stderr.trim()));
         }
     } else {
-        let mut add_cmd = Command::new("git");
-        add_cmd.arg("-C").arg(repo_path).args(["add", "--"]);
-        for f in &req.selected_files {
-            add_cmd.arg(f);
-        }
-        let add_out = add_cmd.output().context("执行 git add 失败")?;
-        if !add_out.status.success() {
-            return Err(anyhow!(
-                "git add 失败: {}",
-                String::from_utf8_lossy(&add_out.stderr).trim()
-            ));
+        let mut add_args: Vec<&str> = Vec::with_capacity(req.selected_files.len() + 2);
+        add_args.push("add");
+        add_args.push("--");
+        add_args.extend(req.selected_files.iter().map(String::as_str));
+        let add_out = crate::exec::git_output(repo_path, &add_args, GitAccess::Write)
+            .context("执行 git add 失败")?;
+        if !add_out.success {
+            return Err(anyhow!("git add 失败: {}", add_out.stderr.trim()));
         }
     }
 
-    let mut commit_cmd = Command::new("git");
-    commit_cmd
-        .arg("-C")
-        .arg(repo_path)
-        .args(["commit", "-m", msg]);
+    let mut commit_envs: Vec<(&str, &str)> = Vec::new();
     if let Some(name) = req.author_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        commit_cmd
-            .env("GIT_AUTHOR_NAME", name)
-            .env("GIT_COMMITTER_NAME", name);
+        commit_envs.push(("GIT_AUTHOR_NAME", name));
+        commit_envs.push(("GIT_COMMITTER_NAME", name));
     }
     if let Some(email) = req.author_email.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        commit_cmd
-            .env("GIT_AUTHOR_EMAIL", email)
-            .env("GIT_COMMITTER_EMAIL", email);
+        commit_envs.push(("GIT_AUTHOR_EMAIL", email));
+        commit_envs.push(("GIT_COMMITTER_EMAIL", email));
     }
 
-    let commit_out = commit_cmd.output().context("执行 git commit 失败")?;
-    if !commit_out.status.success() {
-        let stderr = String::from_utf8_lossy(&commit_out.stderr);
-        let stdout = String::from_utf8_lossy(&commit_out.stdout);
+    let commit_out = crate::exec::git_output_env(
+        repo_path,
+        &["commit", "-m", msg],
+        GitAccess::Write,
+        &commit_envs,
+    )
+    .context("执行 git commit 失败")?;
+    if !commit_out.success {
         return Err(anyhow!(
             "git commit 失败: {} {}",
-            stderr.trim(),
-            stdout.trim()
+            commit_out.stderr.trim(),
+            commit_out.stdout.trim()
         ));
     }
 
-    let hash_out = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "HEAD".to_string());
+    let hash_out =
+        crate::exec::git_output(repo_path, &["rev-parse", "--short", "HEAD"], GitAccess::Read)
+            .ok()
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "HEAD".to_string());
 
     Ok(CommitResult {
         repo_path: changeset.repo_path,
@@ -506,13 +469,13 @@ pub fn push_repo(repo_path: &Path, remote: &str, branch: Option<&str>) -> Result
     let current_branch = match branch.map(str::trim).filter(|s| !s.is_empty()) {
         Some(b) => b.to_string(),
         None => {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(repo_path)
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .output()
-                .context("读取当前分支失败")?;
-            let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let out = crate::exec::git_output(
+                repo_path,
+                &["rev-parse", "--abbrev-ref", "HEAD"],
+                GitAccess::Read,
+            )
+            .context("读取当前分支失败")?;
+            let b = out.stdout.trim().to_string();
             if b.is_empty() || b == "HEAD" {
                 return Err(anyhow!("当前处于 Detached HEAD，无法直接推送"));
             }
@@ -521,17 +484,14 @@ pub fn push_repo(repo_path: &Path, remote: &str, branch: Option<&str>) -> Result
     };
 
     if matches!(vcs_kind, VcsKind::Jj | VcsKind::JjColocated) && detect_jj_version().is_some() {
-        let out = Command::new("jj")
-            .arg("-R")
-            .arg(repo_path)
-            .args(["git", "push", "--remote", remote])
-            .output()
-            .context("执行 jj git push 失败")?;
-        if !out.status.success() {
-            return Err(anyhow!(
-                "jj 推送失败: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
+        let out = crate::exec::jj_output(
+            repo_path,
+            &["git", "push", "--remote", remote],
+            GitAccess::Network,
+        )
+        .context("执行 jj git push 失败")?;
+        if !out.success {
+            return Err(anyhow!("jj 推送失败: {}", out.stderr.trim()));
         }
         return Ok(PushResult {
             repo_path: repo_path.to_string_lossy().to_string(),
@@ -541,17 +501,14 @@ pub fn push_repo(repo_path: &Path, remote: &str, branch: Option<&str>) -> Result
         });
     }
 
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["push", "-u", remote, &current_branch])
-        .output()
-        .context("执行 git push 失败")?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "git push 失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let out = crate::exec::git_output(
+        repo_path,
+        &["push", "-u", remote, &current_branch],
+        GitAccess::Network,
+    )
+    .context("执行 git push 失败")?;
+    if !out.success {
+        return Err(anyhow!("git push 失败: {}", out.stderr.trim()));
     }
 
     Ok(PushResult {
@@ -572,23 +529,20 @@ pub fn land_branch_to_trunk(
         return Err(anyhow!("目标主干分支名称不能为空"));
     }
 
-    let status_out = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["status", "--porcelain"])
-        .output()
-        .context("检查工作区状态失败")?;
-    if !String::from_utf8_lossy(&status_out.stdout).trim().is_empty() {
+    let status_out =
+        crate::exec::git_output(repo_path, &["status", "--porcelain"], GitAccess::Read)
+            .context("检查工作区状态失败")?;
+    if !status_out.stdout.trim().is_empty() {
         return Err(anyhow!("工作区存在未提交改动，请先提交或清理后再合入主干"));
     }
 
-    let head_out = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .context("读取当前分支失败")?;
-    let source_branch = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+    let head_out = crate::exec::git_output(
+        repo_path,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        GitAccess::Read,
+    )
+    .context("读取当前分支失败")?;
+    let source_branch = head_out.stdout.trim().to_string();
     if source_branch == "HEAD" {
         return Err(anyhow!("当前处于 Detached HEAD，无法合入主干"));
     }
@@ -596,52 +550,38 @@ pub fn land_branch_to_trunk(
         return Err(anyhow!("当前已位于主干分支 {trunk}"));
     }
 
-    let co_trunk = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["checkout", trunk])
-        .output()
+    let co_trunk = crate::exec::git_output(repo_path, &["checkout", trunk], GitAccess::Write)
         .context("切换到主干分支失败")?;
-    if !co_trunk.status.success() {
+    if !co_trunk.success {
         return Err(anyhow!(
             "切换至主干 {trunk} 失败: {}",
-            String::from_utf8_lossy(&co_trunk.stderr).trim()
+            co_trunk.stderr.trim()
         ));
     }
 
     let merge_msg = format!("merge: 合入分支 {source_branch} 至 {trunk}");
-    let merge_out = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["merge", "--no-ff", &source_branch, "-m", &merge_msg])
-        .output()
-        .context("执行 git merge 失败")?;
-    if !merge_out.status.success() {
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["merge", "--abort"])
-            .output();
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["checkout", &source_branch])
-            .output();
+    let merge_out = crate::exec::git_output(
+        repo_path,
+        &["merge", "--no-ff", &source_branch, "-m", &merge_msg],
+        GitAccess::Write,
+    )
+    .context("执行 git merge 失败")?;
+    if !merge_out.success {
+        let _ = crate::exec::git_output(repo_path, &["merge", "--abort"], GitAccess::Write);
+        let _ =
+            crate::exec::git_output(repo_path, &["checkout", &source_branch], GitAccess::Write);
         return Err(anyhow!(
             "合入主干存在冲突，已自动中止合并并切回 {source_branch}: {}",
-            String::from_utf8_lossy(&merge_out.stdout).trim()
+            merge_out.stdout.trim()
         ));
     }
 
     let mut deleted = false;
     if delete_source {
-        let del_out = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(["branch", "-d", &source_branch])
-            .output();
+        let del_out =
+            crate::exec::git_output(repo_path, &["branch", "-d", &source_branch], GitAccess::Write);
         if let Ok(out) = del_out {
-            deleted = out.status.success();
+            deleted = out.success;
         }
     }
 
@@ -664,18 +604,20 @@ pub fn enable_jj_colocated(repo_path: &Path) -> Result<String> {
             "本机尚未安装 Jujutsu (jj)，可执行 brew install jj 后重试"
         ));
     }
-    let out = Command::new("jj")
-        .arg("git")
-        .arg("init")
-        .arg("--colocate")
-        .arg(repo_path)
-        .output()
-        .context("执行 jj git init --colocate 失败")?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "开启 jj 共存失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let out = crate::exec::run_raw(
+        "jj",
+        &[
+            OsString::from("git"),
+            OsString::from("init"),
+            OsString::from("--colocate"),
+            repo_path.as_os_str().to_os_string(),
+        ],
+        &[],
+        GitAccess::Write,
+    )
+    .context("执行 jj git init --colocate 失败")?;
+    if !out.success {
+        return Err(anyhow!("开启 jj 共存失败: {}", out.stderr.trim()));
     }
     Ok("已开启 jj + Git 共存模式，可无暂存区提交并支持 jj undo 全局撤销".to_string())
 }
@@ -684,17 +626,10 @@ pub fn jj_undo(repo_path: &Path) -> Result<String> {
     if detect_jj_version().is_none() {
         return Err(anyhow!("本机尚未安装 Jujutsu (jj)"));
     }
-    let out = Command::new("jj")
-        .arg("-R")
-        .arg(repo_path)
-        .args(["op", "undo"])
-        .output()
+    let out = crate::exec::jj_output(repo_path, &["op", "undo"], GitAccess::Write)
         .context("执行 jj op undo 失败")?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "jj undo 失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    if !out.success {
+        return Err(anyhow!("jj undo 失败: {}", out.stderr.trim()));
     }
     Ok("已通过 jj op undo 撤销上一步仓库操作".to_string())
 }
@@ -748,6 +683,7 @@ pub fn batch_commit_and_push(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn git_ok(dir: &Path, args: &[&str]) {

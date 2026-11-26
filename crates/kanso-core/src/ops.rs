@@ -1,7 +1,7 @@
+use crate::exec::GitAccess;
 use crate::model::BatchOpResult;
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn repo_name(path: &Path) -> String {
     path.file_name()
@@ -15,23 +15,19 @@ fn validate_branch_name(repo_path: &Path, branch_name: &str) -> Result<()> {
         return Err(anyhow!("Branch name cannot be empty"));
     }
     let check_ref = format!("refs/heads/{trimmed}");
-    let format_ok = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["check-ref-format", &check_ref])
-        .status()
+    let format_ok = crate::exec::git_output(repo_path, &["check-ref-format", &check_ref], GitAccess::Read)
         .context("Failed to execute git check-ref-format")?;
-    if !format_ok.success() {
+    if !format_ok.success {
         return Err(anyhow!("Invalid Git branch name: {trimmed}"));
     }
 
-    let exists = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["show-ref", "--verify", "--quiet", &check_ref])
-        .status()
-        .context("Failed to execute git show-ref")?;
-    if exists.success() {
+    let exists = crate::exec::git_output(
+        repo_path,
+        &["show-ref", "--verify", "--quiet", &check_ref],
+        GitAccess::Read,
+    )
+    .context("Failed to execute git show-ref")?;
+    if exists.success {
         return Err(anyhow!("Branch '{trimmed}' already exists"));
     }
 
@@ -42,16 +38,11 @@ pub fn rescue_dirty_trunk(repo_path: &Path, new_branch: &str) -> Result<String> 
     let branch = new_branch.trim();
     validate_branch_name(repo_path, branch)?;
 
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["checkout", "-b", branch])
-        .output()
+    let out = crate::exec::git_output(repo_path, &["checkout", "-b", branch], GitAccess::Write)
         .with_context(|| format!("Failed to checkout new branch in {}", repo_path.display()))?;
 
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(anyhow!("Failed to rescue changes: {}", stderr.trim()));
+    if !out.success {
+        return Err(anyhow!("Failed to rescue changes: {}", out.stderr.trim()));
     }
 
     Ok(format!("Moved uncommitted changes to branch '{branch}'"))
@@ -83,8 +74,8 @@ pub fn batch_create_branch(
                 args.push(base);
             }
 
-            match Command::new("git").arg("-C").arg(path).args(&args).output() {
-                Ok(out) if out.status.success() => BatchOpResult {
+            match crate::exec::git_output(path, &args, GitAccess::Write) {
+                Ok(out) if out.success => BatchOpResult {
                     repo_path: path_str,
                     repo_name: name,
                     success: true,
@@ -94,7 +85,7 @@ pub fn batch_create_branch(
                     repo_path: path_str,
                     repo_name: name,
                     success: false,
-                    message: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                    message: out.stderr.trim().to_string(),
                 },
                 Err(err) => BatchOpResult {
                     repo_path: path_str,
@@ -114,13 +105,9 @@ pub fn batch_pull_trunk(repos: &[(PathBuf, String)]) -> Vec<BatchOpResult> {
             let name = repo_name(path);
             let path_str = path.to_string_lossy().to_string();
 
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(path)
-                .args(["status", "--porcelain"])
-                .output();
+            let status = crate::exec::git_output(path, &["status", "--porcelain"], GitAccess::Read);
             match status {
-                Ok(out) if !String::from_utf8_lossy(&out.stdout).trim().is_empty() => {
+                Ok(out) if !out.stdout.trim().is_empty() => {
                     return BatchOpResult {
                         repo_path: path_str,
                         repo_name: name,
@@ -139,13 +126,13 @@ pub fn batch_pull_trunk(repos: &[(PathBuf, String)]) -> Vec<BatchOpResult> {
                 _ => {}
             }
 
-            let head = Command::new("git")
-                .arg("-C")
-                .arg(path)
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .output();
+            let head = crate::exec::git_output(
+                path,
+                &["rev-parse", "--abbrev-ref", "HEAD"],
+                GitAccess::Read,
+            );
             if let Ok(out) = head {
-                let current = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let current = out.stdout.trim().to_string();
                 if current != *trunk {
                     return BatchOpResult {
                         repo_path: path_str,
@@ -156,17 +143,13 @@ pub fn batch_pull_trunk(repos: &[(PathBuf, String)]) -> Vec<BatchOpResult> {
                 }
             }
 
-            match Command::new("git")
-                .arg("-C")
-                .arg(path)
-                .args(["pull", "--ff-only"])
-                .output()
-            {
-                Ok(out) if out.status.success() => BatchOpResult {
+            match crate::exec::git_output(path, &["pull", "--ff-only"], GitAccess::Network) {
+                Ok(out) if out.success => BatchOpResult {
                     repo_path: path_str,
                     repo_name: name,
                     success: true,
-                    message: String::from_utf8_lossy(&out.stdout)
+                    message: out
+                        .stdout
                         .lines()
                         .last()
                         .unwrap_or("Up to date")
@@ -176,7 +159,7 @@ pub fn batch_pull_trunk(repos: &[(PathBuf, String)]) -> Vec<BatchOpResult> {
                     repo_path: path_str,
                     repo_name: name,
                     success: false,
-                    message: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                    message: out.stderr.trim().to_string(),
                 },
                 Err(err) => BatchOpResult {
                     repo_path: path_str,
@@ -193,6 +176,7 @@ pub fn batch_pull_trunk(repos: &[(PathBuf, String)]) -> Vec<BatchOpResult> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]

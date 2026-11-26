@@ -1,14 +1,18 @@
 use crate::commit::detect_vcs_kind;
 use crate::config::load_kanso_yaml;
-use crate::model::{RepoStatus, VcsKind, WorkspaceConfig, WorkspaceSnapshot, WorktreeEntry};
+use crate::exec::GitAccess;
+use crate::model::{
+    RepoFailure, RepoStatus, VcsKind, WorkspaceConfig, WorkspaceSnapshot, WorktreeEntry,
+};
 use crate::task::{aggregate_tasks, detect_alerts};
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use rayon::prelude::*;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 const DEFAULT_IGNORED_DIRS: &[&str] = &[
@@ -27,7 +31,7 @@ const DEFAULT_IGNORED_DIRS: &[&str] = &[
     ".cargo",
 ];
 
-const DEFAULT_MAX_DEPTH: usize = 6;
+pub const DEFAULT_MAX_DEPTH: usize = 6;
 const TRUNK_CANDIDATES: &[&str] = &["main", "master", "develop", "dev"];
 
 pub trait VcsBackend: Send + Sync {
@@ -44,39 +48,18 @@ pub struct GitCliBackend;
 
 impl GitCliBackend {
     fn run_git(&self, repo_path: &Path, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(args)
-            .output()
-            .with_context(|| format!("Failed to spawn git in {}", repo_path.display()))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!(
-                "git {} failed in {}: {}",
-                args.join(" "),
-                repo_path.display(),
-                stderr.trim()
-            ));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        crate::exec::git(repo_path, args, GitAccess::Read)
     }
 
     fn list_refs(&self, repo_path: &Path) -> HashSet<String> {
-        let Ok(output) = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .arg("show-ref")
-            .output()
-        else {
+        let Ok(output) = crate::exec::git_output(repo_path, &["show-ref"], GitAccess::Read) else {
             return HashSet::new();
         };
-        if !output.status.success() {
+        if !output.success {
             return HashSet::new();
         }
-        String::from_utf8_lossy(&output.stdout)
+        output
+            .stdout
             .lines()
             .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
             .collect()
@@ -260,13 +243,9 @@ impl VcsBackend for GitCliBackend {
     ) -> Result<RepoStatus> {
         let vcs_kind = detect_vcs_kind(repo_path);
         if vcs_kind == VcsKind::Jj && !repo_path.join(".git").exists() {
-            let st_out = Command::new("jj")
-                .arg("-R")
-                .arg(repo_path)
-                .args(["diff", "--summary"])
-                .output()
+            let st_out = crate::exec::jj(repo_path, &["diff", "--summary"], GitAccess::Read)
                 .context("未安装 jj，无法读取纯 jj 仓库状态")?;
-            let modified_count = String::from_utf8_lossy(&st_out.stdout).lines().count() as u32;
+            let modified_count = st_out.lines().count() as u32;
             let canonical_path = fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
             let canonical_root =
                 fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
@@ -545,6 +524,60 @@ fn walk_discover(
     }
 }
 
+pub fn resolve_workspace_settings(workspace: &WorkspaceConfig) -> (Vec<String>, Option<String>) {
+    let root = Path::new(&workspace.root_path);
+    let root_yaml = load_kanso_yaml(root).ok().flatten();
+    let mut ignore_dirs = workspace.ignore_dirs.clone();
+    let mut effective_trunk = workspace.default_trunk.clone();
+    if let Some(yaml) = &root_yaml {
+        ignore_dirs.extend(yaml.ignore_dirs.iter().cloned());
+        if effective_trunk.is_none() {
+            effective_trunk = yaml.trunk_branch.clone();
+        }
+    }
+    (ignore_dirs, effective_trunk)
+}
+
+fn scan_pool() -> &'static rayon::ThreadPool {
+    static SCAN_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    SCAN_POOL.get_or_init(|| {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2);
+        let num_threads = (cpus / 2).min(4).max(1);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("build kanso scan thread pool")
+    })
+}
+
+fn compute_relative_path(repo_path: &Path, root: &Path) -> String {
+    let canonical_path = fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    canonical_path
+        .strip_prefix(&canonical_root)
+        .map(|rel| {
+            let s = rel.to_string_lossy().to_string();
+            if s.is_empty() {
+                String::from(".")
+            } else {
+                s
+            }
+        })
+        .unwrap_or_else(|_| canonical_path.to_string_lossy().to_string())
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 pub fn scan_workspace(workspace: &WorkspaceConfig) -> Result<WorkspaceSnapshot> {
     let start = Instant::now();
     let root = PathBuf::from(&workspace.root_path);
@@ -555,29 +588,46 @@ pub fn scan_workspace(workspace: &WorkspaceConfig) -> Result<WorkspaceSnapshot> 
         ));
     }
 
-    let root_yaml = load_kanso_yaml(&root).ok().flatten();
-    let mut ignore_dirs = workspace.ignore_dirs.clone();
-    let mut effective_trunk = workspace.default_trunk.clone();
-    if let Some(yaml) = &root_yaml {
-        ignore_dirs.extend(yaml.ignore_dirs.iter().cloned());
-        if effective_trunk.is_none() {
-            effective_trunk = yaml.trunk_branch.clone();
-        }
-    }
+    let (ignore_dirs, effective_trunk) = resolve_workspace_settings(workspace);
 
     let repo_paths = discover_repos(&root, &ignore_dirs, DEFAULT_MAX_DEPTH);
     let backend = GitCliBackend;
 
-    let mut repos: Vec<RepoStatus> = repo_paths
-        .par_iter()
-        .filter_map(|path| {
-            backend
-                .inspect_repo(path, &root, effective_trunk.as_deref())
-                .ok()
-        })
-        .collect();
+    let outcomes: Vec<std::result::Result<RepoStatus, RepoFailure>> = scan_pool().install(|| {
+        repo_paths
+            .par_iter()
+            .map(|path| {
+                let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    backend.inspect_repo(path, &root, effective_trunk.as_deref())
+                }));
+                match res {
+                    Ok(Ok(repo)) => Ok(repo),
+                    Ok(Err(err)) => Err(RepoFailure {
+                        repo_path: path.to_string_lossy().to_string(),
+                        relative_path: compute_relative_path(path, &root),
+                        error: err.to_string(),
+                    }),
+                    Err(payload) => Err(RepoFailure {
+                        repo_path: path.to_string_lossy().to_string(),
+                        relative_path: compute_relative_path(path, &root),
+                        error: format!("扫描异常 panic: {}", panic_payload_message(payload)),
+                    }),
+                }
+            })
+            .collect()
+    });
+
+    let mut repos = Vec::new();
+    let mut failures = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Ok(repo) => repos.push(repo),
+            Err(failure) => failures.push(failure),
+        }
+    }
 
     repos.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    failures.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
     let tasks = aggregate_tasks(&repos);
     let alerts = detect_alerts(&repos);
@@ -589,6 +639,7 @@ pub fn scan_workspace(workspace: &WorkspaceConfig) -> Result<WorkspaceSnapshot> 
         scanned_at: Utc::now().timestamp(),
         scan_duration_ms: start.elapsed().as_millis() as u64,
         repos,
+        failures,
         tasks,
         alerts,
     })
@@ -599,6 +650,7 @@ mod tests {
     use super::*;
     use crate::model::GuardrailKind;
     use std::fs;
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn git(dir: &Path, args: &[&str]) {
@@ -729,5 +781,34 @@ mod tests {
         assert!(snapshot.alerts.iter().any(|a| {
             a.repo_name == "detached-service" && a.kind == GuardrailKind::DetachedHead
         }));
+    }
+
+    #[test]
+    fn records_repo_failure_without_dropping_healthy_repos() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+
+        let ok_a = root.join("service-a");
+        let ok_b = root.join("service-b");
+        let broken = root.join("service-broken");
+
+        init_repo(&ok_a, "main");
+        init_repo(&ok_b, "main");
+        init_repo(&broken, "main");
+        fs::write(broken.join(".git/HEAD"), "not-a-valid-git-head\n").expect("corrupt HEAD");
+
+        let workspace = WorkspaceConfig {
+            id: "ws-fail".to_string(),
+            name: "fail-ws".to_string(),
+            root_path: root.to_string_lossy().to_string(),
+            default_trunk: Some("main".to_string()),
+            ignore_dirs: Vec::new(),
+        };
+
+        let snapshot = scan_workspace(&workspace).expect("scan succeeds overall");
+        assert_eq!(snapshot.repos.len(), 2);
+        assert_eq!(snapshot.failures.len(), 1);
+        assert_eq!(snapshot.failures[0].relative_path, "service-broken");
+        assert!(!snapshot.failures[0].error.is_empty());
     }
 }

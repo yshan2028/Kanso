@@ -98,9 +98,10 @@ fn print_scan_table(dir: &Path, trunk: Option<String>, json_out: bool) -> Result
     }
 
     println!(
-        "Kanso Scan: {} ({} repos, {} tasks, {} alerts, {} ms)\n",
+        "Kanso Scan: {} ({} repos, {} failures, {} tasks, {} alerts, {} ms)\n",
         snapshot.workspace_name,
         snapshot.repos.len(),
+        snapshot.failures.len(),
         snapshot.tasks.len(),
         snapshot.alerts.len(),
         snapshot.scan_duration_ms
@@ -154,6 +155,13 @@ fn print_scan_table(dir: &Path, trunk: Option<String>, json_out: bool) -> Result
                 alert.repo_name,
                 alert.dirty_files
             );
+        }
+    }
+
+    if !snapshot.failures.is_empty() {
+        println!("\n扫描失败仓库 ({}):", snapshot.failures.len());
+        for failure in &snapshot.failures {
+            println!("  - {}: {}", failure.relative_path, failure.error);
         }
     }
 

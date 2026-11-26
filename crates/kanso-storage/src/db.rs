@@ -91,10 +91,47 @@ impl StorageDb {
             );
             CREATE INDEX IF NOT EXISTS idx_ci_runs_repo_started
                 ON ci_runs (repo_path, started_at DESC);
+            CREATE TABLE IF NOT EXISTS workspace_snapshots (
+                workspace_id TEXT PRIMARY KEY,
+                saved_at INTEGER NOT NULL,
+                snapshot_zstd BLOB NOT NULL
+            );
             ",
         )
         .context("Failed to initialize Kanso SQLite schema")?;
         Ok(())
+    }
+
+    pub fn save_snapshot(&self, workspace_id: &str, snapshot_json: &str) -> Result<()> {
+        let compressed = compress_zstd(snapshot_json.as_bytes(), 3)?;
+        let saved_at = Utc::now().timestamp();
+        let conn = self.conn.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO workspace_snapshots (workspace_id, saved_at, snapshot_zstd)
+             VALUES (?1, ?2, ?3)",
+            params![workspace_id, saved_at, compressed],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_snapshot(&self, workspace_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT snapshot_zstd FROM workspace_snapshots WHERE workspace_id = ?1",
+                params![workspace_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match blob {
+            Some(bytes) => {
+                let raw = decompress_zstd(&bytes)?;
+                Ok(Some(
+                    String::from_utf8(raw).context("Snapshot JSON is not valid UTF-8")?,
+                ))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
@@ -435,5 +472,21 @@ mod tests {
             latest.get(ws_dir.to_str().unwrap()).map(String::as_str),
             Some("passed")
         );
+    }
+
+    #[test]
+    fn saves_overwrites_and_loads_zstd_snapshots() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = StorageDb::open(&dir.path().join("kanso.db")).expect("open db");
+
+        assert!(db.load_snapshot("non-existent").unwrap().is_none());
+
+        let v1 = r#"{"workspaceId":"ws-1","repos":[{"name":"alpha"}]}"#;
+        db.save_snapshot("ws-1", v1).expect("save v1");
+        assert_eq!(db.load_snapshot("ws-1").unwrap().as_deref(), Some(v1));
+
+        let v2 = r#"{"workspaceId":"ws-1","repos":[{"name":"beta"}]}"#;
+        db.save_snapshot("ws-1", v2).expect("overwrite v2");
+        assert_eq!(db.load_snapshot("ws-1").unwrap().as_deref(), Some(v2));
     }
 }

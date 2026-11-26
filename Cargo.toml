@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/kanso-core",
+    "crates/kanso-engine",
     "crates/kanso-storage",
     "crates/kanso-ci",
     "crates/kanso-mcp",
@@ -36,4 +37,5 @@ thiserror = "2.0"
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1.15", features = ["v4", "serde"] }
+wait-timeout = "0.2"
 zstd = "0.13"

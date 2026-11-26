@@ -269,6 +269,30 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
         top_section = top_section.push(box_el);
     }
 
+    if !snap.failures.is_empty() {
+        let mut fail_col = column![].spacing(3);
+        for failure in &snap.failures {
+            let summary: String = failure.error.chars().take(120).collect();
+            fail_col = fail_col.push(
+                text(format!("• {}: {}", failure.relative_path, summary))
+                    .size(11)
+                    .color(theme::ACCENT_ROSE),
+            );
+        }
+        let fail_box = container(
+            column![
+                text(format!("扫描失败的仓库 ({})", snap.failures.len()))
+                    .size(12)
+                    .color(theme::ACCENT_ROSE),
+                scrollable(fail_col).height(90),
+            ]
+            .spacing(5),
+        )
+        .padding(10)
+        .style(theme::card_style);
+        top_section = top_section.push(fail_box);
+    }
+
     let visible_paths: Vec<String> = filtered.iter().map(|r| r.path.clone()).collect();
     let all_checked = !visible_paths.is_empty()
         && visible_paths

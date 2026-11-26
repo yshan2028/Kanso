@@ -196,6 +196,14 @@ pub struct GuardrailAlert {
     pub kind: GuardrailKind,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFailure {
+    pub repo_path: String,
+    pub relative_path: String,
+    pub error: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSnapshot {
@@ -205,6 +213,7 @@ pub struct WorkspaceSnapshot {
     pub scanned_at: i64,
     pub scan_duration_ms: u64,
     pub repos: Vec<RepoStatus>,
+    pub failures: Vec<RepoFailure>,
     pub tasks: Vec<TaskGroup>,
     pub alerts: Vec<GuardrailAlert>,
 }
