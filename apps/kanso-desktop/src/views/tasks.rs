@@ -1,8 +1,8 @@
 use crate::app::{KansoApp, Message};
 use crate::theme;
 use iced::widget::{button, column, container, row, scrollable, text};
-use iced::{Alignment, Color, Element, Length};
-use kanso_core::TaskStage;
+use iced::{Alignment, Color, Element, Font, Length};
+use kanso_core::{RepoStatus, TaskStage};
 
 pub fn view(app: &KansoApp) -> Element<'_, Message> {
     let Some(snap) = &app.snapshot else {
@@ -34,7 +34,22 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
 
     let mut cards = column![].spacing(12);
     for task in &snap.tasks {
-        let (stage_label, stage_color) = stage_meta(task.stage);
+        let member_repos: Vec<&RepoStatus> = snap
+            .repos
+            .iter()
+            .filter(|r| task.repo_ids.contains(&r.id))
+            .collect();
+
+        let has_ci_failed = member_repos
+            .iter()
+            .any(|r| app.repo_latest_ci.get(&r.path).map(String::as_str) == Some("failed"));
+        let effective_stage = if has_ci_failed {
+            TaskStage::CiFailed
+        } else {
+            task.stage
+        };
+
+        let (stage_label, stage_color) = stage_meta(effective_stage);
         let pct = task.progress_percent.clamp(1, 100) as u16;
 
         let mut bar_row = row![].height(6);
@@ -64,7 +79,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
         }
 
         let mut member_list = column![].spacing(6);
-        for repo in snap.repos.iter().filter(|r| task.repo_ids.contains(&r.id)) {
+        for repo in member_repos {
             let dirty_text = if repo.is_dirty() {
                 format!("{} 处改动", repo.total_dirty())
             } else {
@@ -76,25 +91,45 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                 theme::ACCENT_GREEN
             };
 
+            let mut member_row = row![
+                text(repo.name.as_str()).size(12).color(theme::TEXT_PRIMARY),
+                text(format!("+{}/-{}", repo.trunk_ahead, repo.trunk_behind))
+                    .size(11)
+                    .font(Font::MONOSPACE)
+                    .color(theme::TEXT_MUTED),
+                container(text("").size(1)).width(Length::Fill),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center);
+
+            if let Some(ci_st) = app.repo_latest_ci.get(&repo.path) {
+                let (ci_label, ci_color) = match ci_st.as_str() {
+                    "passed" => ("CI 通过", theme::ACCENT_GREEN),
+                    "failed" => ("CI 失败", theme::ACCENT_ROSE),
+                    "running" => ("CI 运行中", theme::ACCENT_SKY),
+                    "cancelled" => ("CI 已中止", theme::TEXT_MUTED),
+                    _ => ("CI 未知", theme::TEXT_MUTED),
+                };
+                member_row = member_row.push(
+                    container(text(ci_label).size(11).color(ci_color))
+                        .padding([2, 6])
+                        .style(theme::badge_style(ci_color)),
+                );
+            }
+
+            member_row = member_row
+                .push(text(dirty_text).size(11).color(dirty_color))
+                .push(
+                    button(text("跑 CI").size(11))
+                        .on_press(Message::OpenRepoCi(repo.path.clone()))
+                        .style(theme::secondary_btn_style)
+                        .padding([4, 10]),
+                );
+
             member_list = member_list.push(
-                container(
-                    row![
-                        text(repo.name.as_str()).size(12).color(theme::TEXT_PRIMARY),
-                        text(format!("+{}/-{}", repo.trunk_ahead, repo.trunk_behind))
-                            .size(11)
-                            .color(theme::TEXT_MUTED),
-                        container(text("").size(1)).width(Length::Fill),
-                        text(dirty_text).size(11).color(dirty_color),
-                        button(text("跑 CI").size(11))
-                            .on_press(Message::OpenRepoCi(repo.path.clone()))
-                            .style(theme::secondary_btn_style)
-                            .padding([4, 10]),
-                    ]
-                    .spacing(10)
-                    .align_y(Alignment::Center),
-                )
-                .padding([7, 10])
-                .style(theme::elevated_style),
+                container(member_row)
+                    .padding([7, 10])
+                    .style(theme::elevated_style),
             );
         }
 
@@ -103,6 +138,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                 row![
                     text(task.branch.as_str())
                         .size(14)
+                        .font(Font::MONOSPACE)
                         .color(theme::TEXT_PRIMARY),
                     container(text("").size(1)).width(Length::Fill),
                     container(text(stage_label).size(11).color(stage_color))

@@ -3,6 +3,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
@@ -297,6 +298,23 @@ impl StorageDb {
         let raw = decompress_zstd(&blob)?;
         String::from_utf8(raw).context("CI log is not valid UTF-8")
     }
+
+    pub fn latest_ci_status_by_repo(&self) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT repo_path, status FROM ci_runs ORDER BY started_at DESC, rowid DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut latest = HashMap::new();
+        for row in rows {
+            let (repo_path, status) = row?;
+            latest.entry(repo_path).or_insert(status);
+        }
+        Ok(latest)
+    }
 }
 
 fn map_ci_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CiRunRecord> {
@@ -407,5 +425,15 @@ mod tests {
             .expect("limit 1");
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, "r2");
+
+        db.finish_ci_run("r1", "failed", Some(1), 110, 10, "err")
+            .unwrap();
+        db.finish_ci_run("r2", "passed", Some(0), 210, 10, "ok")
+            .unwrap();
+        let latest = db.latest_ci_status_by_repo().expect("latest map");
+        assert_eq!(
+            latest.get(ws_dir.to_str().unwrap()).map(String::as_str),
+            Some("passed")
+        );
     }
 }

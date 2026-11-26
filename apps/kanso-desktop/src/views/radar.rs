@@ -1,8 +1,9 @@
 use crate::app::{FilterMode, KansoApp, Message};
 use crate::theme;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
-use iced::{Alignment, Color, Element, Length};
-use kanso_core::RepoStatus;
+use iced::{Alignment, Color, Element, Font, Length};
+use kanso_core::{GuardrailAlert, GuardrailKind, RepoStatus};
+use std::collections::HashMap;
 
 pub fn view(app: &KansoApp) -> Element<'_, Message> {
     let Some(snap) = &app.snapshot else {
@@ -29,9 +30,9 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
         .iter()
         .filter(|r| {
             if !q.is_empty()
-                && !r.name.to_lowercase().includes(&q)
-                && !r.current_branch.to_lowercase().includes(&q)
-                && !r.relative_path.to_lowercase().includes(&q)
+                && !r.name.to_lowercase().contains(&q)
+                && !r.current_branch.to_lowercase().contains(&q)
+                && !r.relative_path.to_lowercase().contains(&q)
             {
                 return false;
             }
@@ -54,10 +55,38 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
         .filter(|r| !r.is_on_trunk && (r.upstream.is_none() || r.upstream_ahead > 0))
         .count();
 
+    let has_configured_trunk = app
+        .current_workspace()
+        .and_then(|w| w.default_trunk.as_ref())
+        .is_some();
+
+    let suggested_trunk = if !has_configured_trunk && !app.editing_trunk {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for r in &snap.repos {
+            if !r.is_detached {
+                *counts.entry(r.current_branch.as_str()).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .filter(|(branch, count)| {
+                *count >= 2
+                    && snap
+                        .repos
+                        .iter()
+                        .any(|r| r.trunk_branch.as_deref() != Some(*branch))
+            })
+            .map(|(branch, _)| branch.to_string())
+    } else {
+        None
+    };
+
     let trunk_control: Element<'_, Message> = if app.editing_trunk {
         row![
             text_input("默认主干（如 dev-Java）", &app.trunk_input)
                 .on_input(Message::TrunkInputChanged)
+                .on_submit(Message::SaveTrunk)
                 .style(theme::input_style)
                 .size(12)
                 .width(150)
@@ -75,11 +104,24 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
         .align_y(Alignment::Center)
         .into()
     } else {
-        button(text("设置默认主干").size(11))
-            .on_press(Message::StartEditTrunk)
-            .style(theme::secondary_btn_style)
-            .padding([4, 10])
-            .into()
+        let mut trunk_row = row![
+            button(text("设置默认主干").size(11))
+                .on_press(Message::StartEditTrunk)
+                .style(theme::secondary_btn_style)
+                .padding([4, 10]),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+
+        if let Some(suggested) = suggested_trunk {
+            trunk_row = trunk_row.push(
+                button(text(format!("推荐设为主干: {suggested}")).size(11))
+                    .on_press(Message::ApplySuggestedTrunk(suggested))
+                    .style(theme::warning_btn_style)
+                    .padding([4, 10]),
+            );
+        }
+        trunk_row.into()
     };
 
     let header = row![
@@ -158,12 +200,14 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                     .color(theme::TEXT_PRIMARY),
                 text_input("分支名（如 feat/ai-sync）", &app.batch_branch_name)
                     .on_input(Message::BatchBranchNameChanged)
+                    .on_submit(Message::SubmitBatchBranch)
                     .style(theme::input_style)
                     .size(12)
                     .width(210)
                     .padding([6, 10]),
                 text_input("基线分支（可选）", &app.batch_base_branch)
                     .on_input(Message::BatchBaseBranchChanged)
+                    .on_submit(Message::SubmitBatchBranch)
                     .style(theme::input_style)
                     .size(12)
                     .width(150)
@@ -186,8 +230,10 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
     }
 
     if let Some(results) = &app.batch_results {
+        let ok_count = results.iter().filter(|r| r.success).count();
+        let skip_count = results.len() - ok_count;
         let mut res_col = column![].spacing(4);
-        for item in results.iter().take(6) {
+        for item in results {
             let color = if item.success {
                 theme::ACCENT_GREEN
             } else {
@@ -202,16 +248,19 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
         let box_el = container(
             column![
                 row![
-                    text(format!("批量操作结果（共 {} 项）", results.len()))
-                        .size(12)
-                        .color(theme::TEXT_PRIMARY),
+                    text(format!(
+                        "批量操作结果：成功 {ok_count} 项 · 跳过或失败 {skip_count} 项（共 {} 项）",
+                        results.len()
+                    ))
+                    .size(12)
+                    .color(theme::TEXT_PRIMARY),
                     container(text("").size(1)).width(Length::Fill),
                     button(text("关闭").size(11))
                         .on_press(Message::ClearBatchResults)
                         .style(theme::secondary_btn_style)
                         .padding([3, 8]),
                 ],
-                res_col,
+                scrollable(res_col).height(110),
             ]
             .spacing(6),
         )
@@ -239,7 +288,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
             text("远程同步").size(11).color(theme::TEXT_MUTED).width(Length::FillPortion(2)),
             text("工作区状态").size(11).color(theme::TEXT_MUTED).width(Length::FillPortion(2)),
             text("最近提交").size(11).color(theme::TEXT_MUTED).width(Length::FillPortion(4)),
-            text("操作").size(11).color(theme::TEXT_MUTED).width(70),
+            text("操作").size(11).color(theme::TEXT_MUTED).width(120),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -307,16 +356,23 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                 ]
                 .spacing(1)
                 .width(Length::FillPortion(3)),
-                container(text(repo.current_branch.as_str()).size(11).color(branch_color))
-                    .padding([3, 7])
-                    .style(theme::badge_style(branch_color))
-                    .width(Length::FillPortion(3)),
+                container(
+                    text(repo.current_branch.as_str())
+                        .size(11)
+                        .font(Font::MONOSPACE)
+                        .color(branch_color),
+                )
+                .padding([3, 7])
+                .style(theme::badge_style(branch_color))
+                .width(Length::FillPortion(3)),
                 text(trunk_text)
                     .size(11)
+                    .font(Font::MONOSPACE)
                     .color(theme::TEXT_SECONDARY)
                     .width(Length::FillPortion(2)),
                 text(remote_text)
                     .size(11)
+                    .font(Font::MONOSPACE)
                     .color(theme::TEXT_SECONDARY)
                     .width(Length::FillPortion(2)),
                 container(text(dirty_label).size(11).color(dirty_color))
@@ -325,13 +381,34 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                     .width(Length::FillPortion(2)),
                 text(commit_summary)
                     .size(11)
+                    .font(Font::MONOSPACE)
                     .color(theme::TEXT_SECONDARY)
                     .width(Length::FillPortion(4)),
-                button(text("跑 CI").size(11))
-                    .on_press(Message::OpenRepoCi(repo.path.clone()))
-                    .style(theme::secondary_btn_style)
-                    .width(70)
-                    .padding([4, 10]),
+                {
+                    let mut actions = row![].spacing(4).width(120).align_y(Alignment::Center);
+                    if repo.has_dirty_on_trunk {
+                        actions = actions.push(
+                            button(text("救场").size(11))
+                                .on_press(Message::OpenRescue(GuardrailAlert {
+                                    repo_id: repo.id.clone(),
+                                    repo_name: repo.name.clone(),
+                                    repo_path: repo.path.clone(),
+                                    trunk_branch: repo.trunk_branch.clone(),
+                                    dirty_files: repo.total_dirty(),
+                                    kind: GuardrailKind::DirtyTrunk,
+                                }))
+                                .style(theme::warning_btn_style)
+                                .padding([4, 8]),
+                        );
+                    }
+                    actions = actions.push(
+                        button(text("CI").size(11))
+                            .on_press(Message::OpenRepoCi(repo.path.clone()))
+                            .style(theme::secondary_btn_style)
+                            .padding([4, 10]),
+                    );
+                    actions
+                },
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -352,16 +429,6 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
-}
-
-trait StrIncludes {
-    fn includes(&self, pat: &str) -> bool;
-}
-
-impl StrIncludes for str {
-    fn includes(&self, pat: &str) -> bool {
-        self.contains(pat)
-    }
 }
 
 fn stat_card<'a>(label: &'a str, value: String, color: Color) -> Element<'a, Message> {

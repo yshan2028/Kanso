@@ -63,33 +63,47 @@ impl GitCliBackend {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    fn ref_exists(&self, repo_path: &Path, full_ref: &str) -> bool {
-        Command::new("git")
+    fn list_refs(&self, repo_path: &Path) -> HashSet<String> {
+        let Ok(output) = Command::new("git")
             .arg("-C")
             .arg(repo_path)
-            .args(["show-ref", "--verify", "--quiet", full_ref])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+            .arg("show-ref")
+            .output()
+        else {
+            return HashSet::new();
+        };
+        if !output.status.success() {
+            return HashSet::new();
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+            .collect()
     }
 
     fn resolve_trunk(&self, repo_path: &Path, preferred: Option<&str>) -> Option<(String, String)> {
+        let refs = self.list_refs(repo_path);
+
         if let Some(pref) = preferred.map(str::trim).filter(|s| !s.is_empty()) {
             let local_ref = format!("refs/heads/{pref}");
-            if self.ref_exists(repo_path, &local_ref) {
+            if refs.contains(&local_ref) {
                 return Some((pref.to_string(), local_ref));
             }
             let remote_ref = format!("refs/remotes/origin/{pref}");
-            if self.ref_exists(repo_path, &remote_ref) {
+            if refs.contains(&remote_ref) {
                 return Some((pref.to_string(), remote_ref));
             }
         }
 
-        if let Ok(sym) = self.run_git(repo_path, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
+        if let Some(sym) = refs
+            .contains("refs/remotes/origin/HEAD")
+            .then(|| self.run_git(repo_path, &["symbolic-ref", "refs/remotes/origin/HEAD"]).ok())
+            .flatten()
+        {
             let sym = sym.trim();
             if let Some(branch) = sym.strip_prefix("refs/remotes/origin/") {
                 let local_ref = format!("refs/heads/{branch}");
-                if self.ref_exists(repo_path, &local_ref) {
+                if refs.contains(&local_ref) {
                     return Some((branch.to_string(), local_ref));
                 }
                 return Some((branch.to_string(), sym.to_string()));
@@ -98,14 +112,14 @@ impl GitCliBackend {
 
         for candidate in TRUNK_CANDIDATES {
             let local_ref = format!("refs/heads/{candidate}");
-            if self.ref_exists(repo_path, &local_ref) {
+            if refs.contains(&local_ref) {
                 return Some(((*candidate).to_string(), local_ref));
             }
         }
 
         for candidate in TRUNK_CANDIDATES {
             let remote_ref = format!("refs/remotes/origin/{candidate}");
-            if self.ref_exists(repo_path, &remote_ref) {
+            if refs.contains(&remote_ref) {
                 return Some(((*candidate).to_string(), remote_ref));
             }
         }
@@ -285,9 +299,23 @@ impl VcsBackend for GitCliBackend {
             };
 
         let is_worktree = repo_path.join(".git").is_file();
-        let worktrees = self.list_worktrees(repo_path);
-
         let canonical_path = fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+        let path_str = canonical_path.to_string_lossy().to_string();
+        let worktrees = if is_worktree || repo_path.join(".git").join("worktrees").exists() {
+            self.list_worktrees(repo_path)
+        } else {
+            vec![WorktreeEntry {
+                path: path_str.clone(),
+                branch: if is_detached {
+                    None
+                } else {
+                    Some(current_branch.clone())
+                },
+                head: last_commit_hash.clone(),
+                is_main: true,
+                is_prunable: false,
+            }]
+        };
         let canonical_root =
             fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
         let relative_path = canonical_path
@@ -307,7 +335,6 @@ impl VcsBackend for GitCliBackend {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| relative_path.clone());
 
-        let path_str = canonical_path.to_string_lossy().to_string();
         let id = blake3::hash(path_str.as_bytes()).to_hex()[..16].to_string();
         let has_dirty_on_trunk =
             is_on_trunk && (staged_count + modified_count + untracked_count + conflicted_count > 0);

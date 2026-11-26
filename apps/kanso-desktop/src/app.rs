@@ -10,7 +10,7 @@ use kanso_core::{
     batch_create_branch, batch_pull_trunk, rescue_dirty_trunk, scan_workspace,
 };
 use kanso_storage::{CiRunRecord, NewCiRun, StorageDb, WorkspaceRecord};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -80,6 +80,7 @@ pub struct KansoApp {
     pub ci_cancel_tx: Option<oneshot::Sender<()>>,
     pub displayed_logs: Vec<String>,
     pub displayed_run_status: Option<String>,
+    pub repo_latest_ci: HashMap<String, String>,
 
     pub toast: Option<String>,
     pub copied_mcp: bool,
@@ -111,6 +112,8 @@ pub enum Message {
     CancelEditTrunk,
     TrunkInputChanged(String),
     SaveTrunk,
+    ApplySuggestedTrunk(String),
+    FocusAlerts,
 
     ToggleBatchBranchForm(bool),
     BatchBranchNameChanged(String),
@@ -132,6 +135,8 @@ pub enum Message {
     StartCiPipeline(PipelineDefinition),
     StartCiCustom,
     CancelCi,
+    CopyCiLogs,
+    ClearCiLogs,
     LoadCiHistoryLog(String),
     CiLogLoaded(Result<(String, String), String>),
 
@@ -150,6 +155,7 @@ impl KansoApp {
         );
         let workspaces = db.list_workspaces().unwrap_or_default();
         let active_workspace_id = workspaces.first().map(|w| w.id.clone());
+        let repo_latest_ci = db.latest_ci_status_by_repo().unwrap_or_default();
         let fs_dirty_flag = Arc::new(AtomicBool::new(false));
 
         let mut app = Self {
@@ -186,6 +192,7 @@ impl KansoApp {
             ci_cancel_tx: None,
             displayed_logs: Vec::new(),
             displayed_run_status: None,
+            repo_latest_ci,
             toast: None,
             copied_mcp: false,
         };
@@ -205,10 +212,16 @@ impl KansoApp {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        time::every(Duration::from_millis(200)).map(|_| Message::Tick)
+        if self.ci_running {
+            time::every(Duration::from_millis(150)).map(|_| Message::Tick)
+        } else if self.active_workspace_id.is_some() {
+            time::every(Duration::from_millis(500)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        }
     }
 
-    fn current_workspace(&self) -> Option<&WorkspaceRecord> {
+    pub fn current_workspace(&self) -> Option<&WorkspaceRecord> {
         let id = self.active_workspace_id.as_deref()?;
         self.workspaces.iter().find(|w| w.id == id)
     }
@@ -257,6 +270,9 @@ impl KansoApp {
         };
         self.ci_pipelines = discover_pipelines(Path::new(repo_path));
         self.ci_runs = self.db.list_ci_runs(Some(repo_path), 20).unwrap_or_default();
+        if let Ok(latest) = self.db.latest_ci_status_by_repo() {
+            self.repo_latest_ci = latest;
+        }
     }
 
     fn launch_local_ci(&mut self, pipeline: PipelineDefinition) {
@@ -368,8 +384,9 @@ impl KansoApp {
                     let mut finished = None;
                     if let Ok(buf) = self.ci_live_buf.lock() {
                         if buf.run_id == self.active_ci_run_id {
-                            if buf.lines.len() != self.displayed_logs.len() {
-                                self.displayed_logs = buf.lines.clone();
+                            if buf.lines.len() > self.displayed_logs.len() {
+                                self.displayed_logs
+                                    .extend_from_slice(&buf.lines[self.displayed_logs.len()..]);
                             }
                             if let Some(st) = &buf.finished_status {
                                 finished = Some(st.clone());
@@ -524,6 +541,9 @@ impl KansoApp {
 
             Message::ScanCompleted(res) => {
                 self.scanning = false;
+                if let Ok(latest) = self.db.latest_ci_status_by_repo() {
+                    self.repo_latest_ci = latest;
+                }
                 match res {
                     Ok(snap) => {
                         if let Some(sel) = &self.selected_ci_repo {
@@ -613,8 +633,35 @@ impl KansoApp {
                 Task::none()
             }
 
+            Message::ApplySuggestedTrunk(branch) => {
+                if let Some(id) = self.active_workspace_id.clone() {
+                    match self.db.update_workspace_trunk(&id, Some(&branch)) {
+                        Ok(updated) => {
+                            if let Some(slot) = self.workspaces.iter_mut().find(|w| w.id == id) {
+                                *slot = updated;
+                            }
+                            self.toast = Some(format!("已将默认主干设为 {branch}"));
+                            return self.spawn_scan(&id);
+                        }
+                        Err(err) => self.toast = Some(format!("设置默认主干失败: {err}")),
+                    }
+                }
+                Task::none()
+            }
+
+            Message::FocusAlerts => {
+                self.active_tab = NavTab::Radar;
+                self.filter_mode = FilterMode::Alerts;
+                Task::none()
+            }
+
             Message::ToggleBatchBranchForm(show) => {
-                self.show_batch_branch_form = show;
+                if show && self.selected_repo_paths.is_empty() {
+                    self.toast = Some("请先在下方列表勾选需要创建分支的仓库".to_string());
+                    self.show_batch_branch_form = false;
+                } else {
+                    self.show_batch_branch_form = show;
+                }
                 Task::none()
             }
             Message::BatchBranchNameChanged(v) => {
@@ -781,6 +828,23 @@ impl KansoApp {
                 if let Some(tx) = self.ci_cancel_tx.take() {
                     let _ = tx.send(());
                 }
+                Task::none()
+            }
+
+            Message::CopyCiLogs => {
+                if self.displayed_logs.is_empty() {
+                    self.toast = Some("当前暂无可复制的日志".to_string());
+                    return Task::none();
+                }
+                let text = self.displayed_logs.join("\n");
+                self.toast = Some("已复制 CI 日志到剪贴板".to_string());
+                iced::clipboard::write(text)
+            }
+
+            Message::ClearCiLogs => {
+                self.displayed_logs.clear();
+                self.displayed_run_status = None;
+                self.active_ci_run_id = None;
                 Task::none()
             }
 

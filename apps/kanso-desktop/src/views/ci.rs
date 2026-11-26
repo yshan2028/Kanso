@@ -1,8 +1,17 @@
 use crate::app::{KansoApp, Message};
 use crate::theme;
 use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
-use iced::{Alignment, Element, Length};
+use iced::{Alignment, Color, Element, Font, Length};
 use std::fmt;
+
+fn ci_status_meta(status: &str) -> (&'static str, Color) {
+    match status {
+        "passed" => ("通过", theme::ACCENT_GREEN),
+        "failed" => ("失败", theme::ACCENT_ROSE),
+        "cancelled" => ("已中止", theme::TEXT_MUTED),
+        _ => ("运行中", theme::ACCENT_SKY),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RepoOption {
@@ -63,6 +72,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                 steps_col = steps_col.push(
                     text(format!("$ {}", s.command))
                         .size(11)
+                        .font(Font::MONOSPACE)
                         .color(theme::TEXT_SECONDARY),
                 );
             }
@@ -97,11 +107,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
         history_col = history_col.push(text("暂无历史执行记录").size(11).color(theme::TEXT_MUTED));
     } else {
         for run in &app.ci_runs {
-            let status_color = match run.status.as_str() {
-                "passed" => theme::ACCENT_GREEN,
-                "failed" => theme::ACCENT_ROSE,
-                _ => theme::ACCENT_SKY,
-            };
+            let (status_label, status_color) = ci_status_meta(run.status.as_str());
             let dur_label = run
                 .duration_ms
                 .map(|d| format!("{d} ms"))
@@ -121,7 +127,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                         ]
                         .spacing(2),
                         container(text("").size(1)).width(Length::Fill),
-                        container(text(run.status.as_str()).size(11).color(status_color))
+                        container(text(status_label).size(11).color(status_color))
                             .padding([2, 7])
                             .style(theme::badge_style(status_color)),
                     ]
@@ -148,6 +154,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
             row![
                 text_input("如 mvn test / cargo check", &app.ci_custom_cmd)
                     .on_input(Message::CiCustomCmdChanged)
+                    .on_submit(Message::StartCiCustom)
                     .style(theme::input_style)
                     .size(12)
                     .padding([6, 8]),
@@ -179,13 +186,9 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
     .align_y(Alignment::Center);
 
     if let Some(status) = &app.displayed_run_status {
-        let color = match status.as_str() {
-            "passed" => theme::ACCENT_GREEN,
-            "failed" => theme::ACCENT_ROSE,
-            _ => theme::ACCENT_SKY,
-        };
+        let (status_label, color) = ci_status_meta(status.as_str());
         log_header = log_header.push(
-            container(text(status.as_str()).size(11).color(color))
+            container(text(status_label).size(11).color(color))
                 .padding([3, 8])
                 .style(theme::badge_style(color)),
         );
@@ -199,6 +202,20 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                 .padding([4, 10]),
         );
     }
+
+    log_header = log_header
+        .push(
+            button(text("复制日志").size(11))
+                .on_press(Message::CopyCiLogs)
+                .style(theme::secondary_btn_style)
+                .padding([4, 10]),
+        )
+        .push(
+            button(text("清空").size(11))
+                .on_press(Message::ClearCiLogs)
+                .style(theme::secondary_btn_style)
+                .padding([4, 10]),
+        );
 
     let mut log_lines = column![].spacing(3);
     if app.displayed_logs.is_empty() {
@@ -216,7 +233,12 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
             } else {
                 theme::TEXT_PRIMARY
             };
-            log_lines = log_lines.push(text(line.as_str()).size(12).color(color));
+            log_lines = log_lines.push(
+                text(line.as_str())
+                    .size(12)
+                    .font(Font::MONOSPACE)
+                    .color(color),
+            );
         }
     }
 

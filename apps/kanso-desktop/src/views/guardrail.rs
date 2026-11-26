@@ -21,7 +21,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
         .spacing(8)
         .align_y(Alignment::Center);
 
-        for alert in snap.alerts.iter().take(4) {
+        for alert in snap.alerts.iter().take(3) {
             let desc = match alert.kind {
                 GuardrailKind::DirtyTrunk => format!(
                     "主干({})有 {} 处未提交",
@@ -57,6 +57,15 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
             );
         }
 
+        if snap.alerts.len() > 3 {
+            alert_row = alert_row.push(
+                button(text(format!("查看全部 {} 项告警", snap.alerts.len())).size(11))
+                    .on_press(Message::FocusAlerts)
+                    .style(theme::secondary_btn_style)
+                    .padding([4, 10]),
+            );
+        }
+
         content = content.push(alert_row);
     }
 
@@ -68,6 +77,7 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                     .color(theme::TEXT_PRIMARY),
                 text_input("输入新分支名（如 feat/rescue）", &app.rescue_branch_input)
                     .on_input(Message::RescueBranchChanged)
+                    .on_submit(Message::ConfirmRescue)
                     .style(theme::input_style)
                     .size(12)
                     .width(240)

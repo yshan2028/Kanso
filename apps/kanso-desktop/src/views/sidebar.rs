@@ -85,16 +85,19 @@ pub fn view(app: &KansoApp) -> Element<'_, Message> {
                 text("手动输入工作区路径").size(12).color(theme::TEXT_PRIMARY),
                 text_input("/Users/you/Code/project", &app.manual_ws_path)
                     .on_input(Message::ManualWsPathChanged)
+                    .on_submit(Message::SubmitManualWs)
                     .style(theme::input_style)
                     .size(12)
                     .padding([6, 8]),
                 text_input("显示名称（可选）", &app.manual_ws_name)
                     .on_input(Message::ManualWsNameChanged)
+                    .on_submit(Message::SubmitManualWs)
                     .style(theme::input_style)
                     .size(12)
                     .padding([6, 8]),
                 text_input("默认主干（如 dev-Java）", &app.manual_ws_trunk)
                     .on_input(Message::ManualWsTrunkChanged)
+                    .on_submit(Message::SubmitManualWs)
                     .style(theme::input_style)
                     .size(12)
                     .padding([6, 8]),
