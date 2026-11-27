@@ -72,7 +72,12 @@ pub fn render_overview(state: &AppState, cx: &mut Context<Workbench>) -> AnyElem
         .gap_3()
         .child(metric_card("仓库总数", total_repos.to_string(), fg, cx))
         .child(metric_card("非主干仓库", off_trunk.to_string(), blue, cx))
-        .child(metric_card("有改动仓库", dirty_repos.to_string(), yellow, cx))
+        .child(metric_card(
+            "有改动仓库",
+            dirty_repos.to_string(),
+            yellow,
+            cx,
+        ))
         .child(metric_card("刷新失败", failed_repos.to_string(), red, cx));
 
     let queue_header = div()
@@ -144,15 +149,11 @@ pub fn render_overview(state: &AppState, cx: &mut Context<Workbench>) -> AnyElem
                             .items_center()
                             .gap_2p5()
                             .min_w_0()
-                            .child(
-                                div()
-                                    .text_color(badge_color)
-                                    .child(if item.is_failure {
-                                        IconName::CircleAlert
-                                    } else {
-                                        IconName::TriangleAlert
-                                    }),
-                            )
+                            .child(div().text_color(badge_color).child(if item.is_failure {
+                                IconName::CircleAlert
+                            } else {
+                                IconName::TriangleAlert
+                            }))
                             .child(
                                 div()
                                     .flex()

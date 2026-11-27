@@ -77,7 +77,13 @@ fn synthetic_state(theme: ThemeChoice) -> (AppState, Settings) {
         alerts,
     });
     state.selected = Some("/mock/alpha".to_string());
-    (state, Settings { theme })
+    (
+        state,
+        Settings {
+            theme,
+            ..Settings::default()
+        },
+    )
 }
 
 fn open_test_workbench(
@@ -133,6 +139,39 @@ fn cmd_j() -> &'static str {
 }
 
 #[gpui_kit::test]
+fn ui_model_pages_open_without_a_workspace(cx: &mut TestAppContext) {
+    let (handle, wb) = open_test_workbench(cx, ThemeChoice::Dark);
+    cx.update_window(handle, |_, window, cx| {
+        wb.update(cx, |wb, cx| {
+            wb.state.snapshot = None;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.find("empty-open-workspace-btn").visible());
+
+        for (route, page) in [
+            (Route::Providers, "page-providers"),
+            (Route::Routing, "page-routing"),
+            (Route::Pricing, "page-pricing"),
+            (Route::Usage, "page-usage"),
+            (Route::Settings, "page-settings"),
+        ] {
+            let nav = SharedString::from(format!("sidebar-nav-{route:?}"));
+            assert!(window.find(nav.clone()).visible());
+            window.click(nav, cx);
+            window.render_frame(cx);
+            assert_eq!(wb.read(cx).state.route, route);
+            assert!(window.find(page).visible());
+            assert!(window.try_find("empty-open-workspace-btn").is_none());
+        }
+
+        assert!(wb.read(cx).state.usage.is_none());
+        assert!(wb.read(cx).state.desktop_app.is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn ui_renders_five_rows_with_visible_failure_row(cx: &mut TestAppContext) {
     let (handle, _wb) = open_test_workbench(cx, ThemeChoice::Dark);
     cx.update_window(handle, |_, window, cx| {
@@ -184,7 +223,10 @@ fn ui_chinese_ime_composition_commits_cleanly(cx: &mut TestAppContext) {
         let input_state = wb.read(cx).palette_input.clone();
         let input_id: ElementId = ("input", input_state.entity_id()).into();
         let bounds = window.find(input_id).bounds();
-        let mut ime = TestInput::new(ElementInputHandler::new(bounds, input_state.clone()), window);
+        let mut ime = TestInput::new(
+            ElementInputHandler::new(bounds, input_state.clone()),
+            window,
+        );
 
         ime.compose_text(None, "chong", Some(0..5), cx);
         assert!(

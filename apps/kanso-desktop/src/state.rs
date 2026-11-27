@@ -20,6 +20,16 @@ pub enum Route {
     Tasks,
     CrossCommit,
     Pipeline,
+    /// 查看模型供应商。
+    Providers,
+    /// 查看模型路由。
+    Routing,
+    /// 查看模型价格。
+    Pricing,
+    /// 查看模型用量。
+    Usage,
+    /// 查看应用设置。
+    Settings,
 }
 
 impl Route {
@@ -30,6 +40,11 @@ impl Route {
             Self::Tasks => "任务",
             Self::CrossCommit => "跨仓提交",
             Self::Pipeline => "流水线",
+            Self::Providers => "供应商",
+            Self::Routing => "路由",
+            Self::Pricing => "价格",
+            Self::Usage => "用量",
+            Self::Settings => "设置",
         }
     }
 }
@@ -110,10 +125,46 @@ impl ThemeChoice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub theme: ThemeChoice,
+    /// 供应商优先顺序。
+    #[serde(default = "Default::default")]
+    pub provider_order: Vec<String>,
+    /// 已停用的供应商。
+    #[serde(default = "Default::default")]
+    pub provider_disabled: Vec<String>,
+    /// 默认路由策略。
+    #[serde(default = "Settings::default_routing_policy")]
+    pub routing_policy: String,
+    /// 应用更新渠道。
+    #[serde(default = "Settings::default_update_channel")]
+    pub update_channel: String,
+    /// 是否自动检查更新。
+    #[serde(default = "Settings::default_update_auto_check")]
+    pub update_auto_check: bool,
+    /// 是否自动安装更新。
+    #[serde(default = "Default::default")]
+    pub update_auto_install: bool,
+    /// 用户选择跳过的版本。
+    #[serde(default = "Default::default")]
+    pub update_skipped_version: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::default(),
+            provider_order: Vec::new(),
+            provider_disabled: Vec::new(),
+            routing_policy: Self::default_routing_policy(),
+            update_channel: Self::default_update_channel(),
+            update_auto_check: Self::default_update_auto_check(),
+            update_auto_install: false,
+            update_skipped_version: None,
+        }
+    }
 }
 
 pub fn app_data_dir() -> PathBuf {
@@ -141,6 +192,18 @@ pub fn logs_dir() -> PathBuf {
 }
 
 impl Settings {
+    fn default_routing_policy() -> String {
+        "QuotaFirst".to_string()
+    }
+
+    fn default_update_channel() -> String {
+        "stable".to_string()
+    }
+
+    fn default_update_auto_check() -> bool {
+        true
+    }
+
     pub fn path() -> PathBuf {
         app_data_dir().join("settings.json")
     }
@@ -201,6 +264,48 @@ pub struct PaletteItem {
     pub action: PaletteAction,
 }
 
+/// 用量页面的日期范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageRange {
+    /// 今天。
+    Today,
+    /// 最近七天。
+    D7,
+    /// 最近三十天。
+    D30,
+    /// 全部可用日期。
+    All,
+}
+
+/// 用量页面的标签页。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageTab {
+    /// 汇总统计。
+    Stats,
+    /// 请求明细。
+    Requests,
+}
+
+/// 设置页面的子页。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSub {
+    /// 应用配置。
+    Config,
+    /// 应用更新。
+    Update,
+}
+
+/// 用量明细的分组维度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageDim {
+    /// 按供应商分组。
+    Provider,
+    /// 按模型分组。
+    Model,
+    /// 按 Agent 分组。
+    Agent,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub workspace: Option<WorkspaceRecord>,
@@ -219,6 +324,34 @@ pub struct AppState {
     pub jj_version: Option<String>,
     pub db_error: Option<String>,
     pub recent_palette_ids: Vec<String>,
+    /// 最近一次采集的用量快照。
+    pub usage: Option<kanso_usage::UsageSnapshot>,
+    /// 最近一次用量采集的错误。
+    pub usage_error: Option<String>,
+    /// 从用量与工具信息汇总的供应商。
+    pub providers: Vec<kanso_usage::ProviderEntry>,
+    /// 本地命令行工具的版本信息。
+    pub tool_versions: Vec<kanso_usage::ToolVersion>,
+    /// 本地桌面应用的安装与更新信息。
+    pub desktop_app: Option<kanso_usage::DesktopAppInfo>,
+    /// 当前选中的用量日期范围。
+    pub usage_range: UsageRange,
+    /// 当前选中的用量标签页。
+    pub usage_tab: UsageTab,
+    /// 当前选中的设置子页。
+    pub settings_sub: SettingsSub,
+    /// 用量明细分组维度。
+    pub usage_dim: UsageDim,
+    /// 用量请求明细分页页码（从 0 开始）。
+    pub usage_req_page: usize,
+    /// 用量请求状态筛选（None 为全部）。
+    pub usage_req_filter: Option<kanso_usage::ReqStatus>,
+    /// 每日柱状图当前悬停索引。
+    pub usage_hover_idx: Option<usize>,
+    /// 是否打开检查更新弹窗。
+    pub update_modal_open: bool,
+    /// 页内操作提示文本。
+    pub ui_notice: Option<String>,
 }
 
 impl Default for AppState {
@@ -240,6 +373,20 @@ impl Default for AppState {
             jj_version: None,
             db_error: None,
             recent_palette_ids: Vec::new(),
+            usage: None,
+            usage_error: None,
+            providers: Vec::new(),
+            tool_versions: Vec::new(),
+            desktop_app: None,
+            usage_range: UsageRange::D30,
+            usage_tab: UsageTab::Stats,
+            settings_sub: SettingsSub::Config,
+            usage_dim: UsageDim::Provider,
+            usage_req_page: 0,
+            usage_req_filter: None,
+            usage_hover_idx: None,
+            update_modal_open: false,
+            ui_notice: None,
         }
     }
 }
@@ -334,7 +481,8 @@ impl AppState {
                     } else {
                         snap.repos.push(repo);
                     }
-                    snap.repos.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+                    snap.repos
+                        .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
                     snap.scanned_at = now;
                 }
                 self.recompute_derived();
@@ -342,10 +490,7 @@ impl AppState {
                 if self.selected.is_none() {
                     self.selected = Some(repo_path);
                 }
-                self.push_log(
-                    LogLevel::Info,
-                    format!("增量刷新：{repo_name} ({branch})"),
-                );
+                self.push_log(LogLevel::Info, format!("增量刷新：{repo_name} ({branch})"));
             }
             EngineEvent::RepoFailed(fail) => {
                 let repo_path = fail.repo_path.clone();
@@ -353,7 +498,8 @@ impl AppState {
                 let err = fail.error.clone();
                 if let Some(snap) = self.ensure_snapshot_mut() {
                     snap.repos.retain(|r| r.path != repo_path);
-                    if let Some(slot) = snap.failures.iter_mut().find(|f| f.repo_path == repo_path) {
+                    if let Some(slot) = snap.failures.iter_mut().find(|f| f.repo_path == repo_path)
+                    {
                         *slot = fail;
                     } else {
                         snap.failures.push(fail);
@@ -395,11 +541,7 @@ impl AppState {
         let Some(snap) = &self.snapshot else {
             return Vec::new();
         };
-        let alert_paths: HashSet<&str> = snap
-            .alerts
-            .iter()
-            .map(|a| a.repo_path.as_str())
-            .collect();
+        let alert_paths: HashSet<&str> = snap.alerts.iter().map(|a| a.repo_path.as_str()).collect();
 
         snap.repos
             .iter()
@@ -646,6 +788,41 @@ impl AppState {
                 subtitle: "查看过渡期命令行提示".to_string(),
                 shortcut: None,
                 action: PaletteAction::Navigate(Route::Pipeline),
+            },
+            PaletteItem {
+                id: "nav:providers".to_string(),
+                label: "跳转到：供应商".to_string(),
+                subtitle: "查看模型供应商与本地工具".to_string(),
+                shortcut: None,
+                action: PaletteAction::Navigate(Route::Providers),
+            },
+            PaletteItem {
+                id: "nav:routing".to_string(),
+                label: "跳转到：路由".to_string(),
+                subtitle: "查看模型分配策略".to_string(),
+                shortcut: None,
+                action: PaletteAction::Navigate(Route::Routing),
+            },
+            PaletteItem {
+                id: "nav:pricing".to_string(),
+                label: "跳转到：价格".to_string(),
+                subtitle: "查看模型价格".to_string(),
+                shortcut: None,
+                action: PaletteAction::Navigate(Route::Pricing),
+            },
+            PaletteItem {
+                id: "nav:usage".to_string(),
+                label: "跳转到：用量".to_string(),
+                subtitle: "查看请求明细与用量统计".to_string(),
+                shortcut: None,
+                action: PaletteAction::Navigate(Route::Usage),
+            },
+            PaletteItem {
+                id: "nav:settings".to_string(),
+                label: "跳转到：设置".to_string(),
+                subtitle: "查看应用配置和更新".to_string(),
+                shortcut: None,
+                action: PaletteAction::Navigate(Route::Settings),
             },
         ];
 
@@ -937,10 +1114,23 @@ mod tests {
 
         let cfg = Settings {
             theme: ThemeChoice::Dark,
+            ..Settings::default()
         };
         cfg.save_to(&path).unwrap();
 
         let loaded = Settings::load_from(&path);
         assert_eq!(loaded, cfg);
+    }
+
+    #[test]
+    fn settings_fill_missing_fields_in_existing_json() {
+        let cfg: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(
+            cfg,
+            Settings {
+                theme: ThemeChoice::Dark,
+                ..Settings::default()
+            }
+        );
     }
 }

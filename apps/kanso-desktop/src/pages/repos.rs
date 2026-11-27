@@ -216,11 +216,11 @@ pub fn render_repos(
                                 )
                             };
 
-                            let commit_text = match (&repo.last_commit_hash, &repo.last_commit_message)
-                            {
-                                (Some(h), Some(m)) => format!("{h} {m}"),
-                                _ => "-".to_string(),
-                            };
+                            let commit_text =
+                                match (&repo.last_commit_hash, &repo.last_commit_message) {
+                                    (Some(h), Some(m)) => format!("{h} {m}"),
+                                    _ => "-".to_string(),
+                                };
 
                             div()
                                 .id(SharedString::from(format!("repo-row-{ix}")))
@@ -306,7 +306,11 @@ pub fn render_repos(
                                 .px_3()
                                 .border_b_1()
                                 .border_color(row_border)
-                                .bg(if is_sel { row_active } else { row_red_light.opacity(0.14) })
+                                .bg(if is_sel {
+                                    row_active
+                                } else {
+                                    row_red_light.opacity(0.14)
+                                })
                                 .flex()
                                 .items_center()
                                 .justify_between()

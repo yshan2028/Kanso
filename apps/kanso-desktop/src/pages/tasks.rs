@@ -120,9 +120,7 @@ pub fn render_tasks(state: &AppState, cx: &App) -> AnyElement {
                                 .text_color(theme.muted_foreground)
                                 .child(format!(
                                     "{} 仓 · 脏仓 {} · 待推 {}",
-                                    task.total_repos,
-                                    dirty_total,
-                                    unpushed_total
+                                    task.total_repos, dirty_total, unpushed_total
                                 )),
                         ),
                 )

@@ -49,9 +49,7 @@ pub fn render_placeholder(route: Route, cx: &App) -> AnyElement {
                         .text_size(px(13.0))
                         .line_height(relative(1.4))
                         .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "将在 M3 重建，过渡期请使用 `{cli_cmd}` 命令行。"
-                        )),
+                        .child(format!("将在 M3 重建，过渡期请使用 `{cli_cmd}` 命令行。")),
                 )
                 .child(
                     div()

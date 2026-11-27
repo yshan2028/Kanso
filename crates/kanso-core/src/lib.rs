@@ -3,6 +3,8 @@ pub mod config;
 pub mod exec;
 pub mod model;
 pub mod ops;
+/// 模型角色、路由策略与失败切换契约。
+pub mod routing;
 pub mod scanner;
 pub mod task;
 
@@ -18,6 +20,10 @@ pub use model::{
     WorktreeEntry,
 };
 pub use ops::{batch_create_branch, batch_pull_trunk, rescue_dirty_trunk};
+pub use routing::{
+    Candidate, FailoverState, Role, RolePolicy, RouteOutcome, RoutingInput, SkipReason,
+    next_after_failure, plan_route,
+};
 pub use scanner::{
     DEFAULT_MAX_DEPTH, GitCliBackend, VcsBackend, discover_repos, resolve_workspace_settings,
     scan_workspace,

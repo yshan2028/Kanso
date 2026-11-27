@@ -20,7 +20,7 @@ use kanso_core::{WorkspaceConfig, WorkspaceSnapshot};
 use kanso_engine::{EngineCommand, EngineEvent};
 use kanso_storage::StorageDb;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -102,6 +102,7 @@ pub struct Workbench {
     last_snapshot_save: Option<Instant>,
     _subscriptions: Vec<Subscription>,
     _engine_task: Option<Task<()>>,
+    _usage_task: Option<Task<()>>,
 }
 
 impl Workbench {
@@ -109,7 +110,10 @@ impl Workbench {
         mut state: AppState,
         settings: Settings,
         db: Option<Arc<StorageDb>>,
-        engine: Option<(EngineLink, futures::channel::mpsc::UnboundedReceiver<EngineEvent>)>,
+        engine: Option<(
+            EngineLink,
+            futures::channel::mpsc::UnboundedReceiver<EngineEvent>,
+        )>,
         started_at: Option<Instant>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -163,6 +167,7 @@ impl Workbench {
             }
             None => (None, None),
         };
+        let usage_task = started_at.map(|_| Self::spawn_usage_collection(cx));
 
         Self {
             state,
@@ -180,7 +185,45 @@ impl Workbench {
             last_snapshot_save: None,
             _subscriptions: subs,
             _engine_task: engine_task,
+            _usage_task: usage_task,
         }
+    }
+
+    fn spawn_usage_collection(cx: &mut Context<Self>) -> Task<()> {
+        use kanso_usage::{collect_snapshot, derive_providers, probe_desktop_app, probe_tools};
+
+        cx.spawn(async move |this, cx| {
+            let (usage, tools, desktop_app) = cx
+                .background_executor()
+                .spawn(async move {
+                    let usage = dirs::home_dir()
+                        .ok_or_else(|| anyhow::anyhow!("无法确定用户主目录"))
+                        .and_then(|home| collect_snapshot(&home, Local::now(), 30));
+                    let tools = probe_tools();
+                    let desktop_app = probe_desktop_app(
+                        Path::new("/Applications/ChatGPT.app"),
+                        "com.openai.codex",
+                    );
+                    (usage, tools, desktop_app)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                match usage {
+                    Ok(snapshot) => {
+                        this.state.providers = derive_providers(&snapshot, &tools);
+                        this.state.usage = Some(snapshot);
+                        this.state.usage_error = None;
+                    }
+                    Err(err) => {
+                        this.state.usage_error = Some(format!("采集用量失败：{err}"));
+                    }
+                }
+                this.state.tool_versions = tools;
+                this.state.desktop_app = Some(desktop_app);
+                cx.notify();
+            });
+        })
     }
 
     fn spawn_engine_listener(
@@ -204,7 +247,9 @@ impl Workbench {
         let should_save = matches!(ev, EngineEvent::SnapshotReady(_));
         let is_incremental = matches!(
             ev,
-            EngineEvent::RepoUpdated(_) | EngineEvent::RepoFailed(_) | EngineEvent::ReposChanged { .. }
+            EngineEvent::RepoUpdated(_)
+                | EngineEvent::RepoFailed(_)
+                | EngineEvent::ReposChanged { .. }
         );
         self.state.apply_event(ev);
 
@@ -297,8 +342,10 @@ impl Workbench {
         }
         self.state
             .set_bg_task("engine-sync", "工作区全量校对", true, "后台扫描中...");
-        self.state
-            .push_log(LogLevel::Info, format!("打开工作区：{}", ws_record.root_path));
+        self.state.push_log(
+            LogLevel::Info,
+            format!("打开工作区：{}", ws_record.root_path),
+        );
 
         let ws_cfg = WorkspaceConfig {
             id: ws_record.id,
@@ -367,8 +414,10 @@ impl Workbench {
                     .push_log(LogLevel::Info, format!("已请求刷新仓库：{repo_path}"));
             }
         } else {
-            self.state
-                .push_log(LogLevel::Info, format!("未挂载后台引擎，记录单仓重试日志：{repo_path}"));
+            self.state.push_log(
+                LogLevel::Info,
+                format!("未挂载后台引擎，记录单仓重试日志：{repo_path}"),
+            );
         }
         cx.notify();
     }
@@ -489,30 +538,54 @@ impl Workbench {
             (Route::Pipeline, IconName::Workflow),
         ];
 
-        let mut nav_col = div().flex().flex_col().gap_0p5();
-        for (route, icon) in nav_items {
+        let nav_item = |(route, icon): (Route, IconName)| {
             let active = self.state.route == route;
-            nav_col = nav_col.child(
+            div()
+                .id(SharedString::from(format!("sidebar-nav-{route:?}")))
+                .px_2p5()
+                .py_1p5()
+                .rounded(px(6.0))
+                .when(active, |d| d.bg(active_bg).text_color(active_fg))
+                .when(!active, |d| d.text_color(fg))
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(13.0))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.route = route;
+                    cx.notify();
+                }))
+                .child(icon)
+                .child(route.label())
+                .test_support()
+        };
+
+        let nav_col = div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .children(nav_items.map(nav_item));
+        let model_nav = div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(
                 div()
-                    .id(SharedString::from(format!("sidebar-nav-{route:?}")))
-                    .px_2p5()
-                    .py_1p5()
-                    .rounded(px(6.0))
-                    .when(active, |d| d.bg(active_bg).text_color(active_fg))
-                    .when(!active, |d| d.text_color(fg))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(13.0))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.route = route;
-                        cx.notify();
-                    }))
-                    .child(icon)
-                    .child(route.label()),
+                    .px_2()
+                    .text_size(px(11.0))
+                    .text_color(muted)
+                    .child("模型与路由"),
+            )
+            .children(
+                [
+                    (Route::Providers, IconName::Server),
+                    (Route::Routing, IconName::Route),
+                    (Route::Pricing, IconName::DollarSign),
+                    (Route::Usage, IconName::Activity),
+                ]
+                .map(nav_item),
             );
-        }
 
         let filters = [
             RepoFilter::Dirty,
@@ -592,12 +665,7 @@ impl Workbench {
                                         .child(repo.name.clone()),
                                 ),
                         )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(muted)
-                                .child(tag),
-                        ),
+                        .child(div().text_size(px(11.0)).text_color(muted).child(tag)),
                 );
             }
             tree_col = tree_col.child(group_box);
@@ -615,6 +683,7 @@ impl Workbench {
             .gap_3()
             .overflow_hidden()
             .child(nav_col)
+            .child(model_nav)
             .child(div().h(px(1.0)).bg(border))
             .child(
                 div()
@@ -648,6 +717,7 @@ impl Workbench {
                     )
                     .child(tree_col),
             )
+            .child(nav_item((Route::Settings, IconName::Settings)))
             .into_any_element()
     }
 
@@ -699,7 +769,12 @@ impl Workbench {
                                 .child(repo.relative_path.clone()),
                         ),
                 )
-                .child(inspector_kv("当前分支", repo.current_branch.clone(), mono.clone(), cx))
+                .child(inspector_kv(
+                    "当前分支",
+                    repo.current_branch.clone(),
+                    mono.clone(),
+                    cx,
+                ))
                 .child(inspector_kv("主干偏离", trunk_text, mono.clone(), cx))
                 .child(inspector_kv("远端跟踪", remote_text, mono.clone(), cx))
                 .child(inspector_kv("工作区状态", dirty_text, mono.clone(), cx))
@@ -816,12 +891,10 @@ impl Workbench {
         let muted = theme.muted_foreground;
 
         let tab_btn = |id: &'static str, tab: BottomTab, active: bool| {
-            let b = Button::new(id)
-                .small()
-                .label(match tab {
-                    BottomTab::Tasks => "后台任务",
-                    BottomTab::Log => "操作日志",
-                });
+            let b = Button::new(id).small().label(match tab {
+                BottomTab::Tasks => "后台任务",
+                BottomTab::Log => "操作日志",
+            });
             if active { b.primary() } else { b.ghost() }
         };
 
@@ -932,11 +1005,14 @@ impl Workbench {
                                         LogLevel::Warn => ("WARN", yellow),
                                         LogLevel::Error => ("ERR ", red),
                                     };
-                                    let ts_str = DateTime::<Utc>::from_timestamp(entry.timestamp, 0)
-                                        .map(|dt| {
-                                            dt.with_timezone(&Local).format("%H:%M:%S").to_string()
-                                        })
-                                        .unwrap_or_else(|| "--:--:--".to_string());
+                                    let ts_str =
+                                        DateTime::<Utc>::from_timestamp(entry.timestamp, 0)
+                                            .map(|dt| {
+                                                dt.with_timezone(&Local)
+                                                    .format("%H:%M:%S")
+                                                    .to_string()
+                                            })
+                                            .unwrap_or_else(|| "--:--:--".to_string());
                                     div()
                                         .h(px(22.0))
                                         .px_3()
@@ -1076,7 +1152,12 @@ impl Render for Workbench {
             .workspace
             .as_ref()
             .map(|w| w.name.clone())
-            .or_else(|| self.state.snapshot.as_ref().map(|s| s.workspace_name.clone()))
+            .or_else(|| {
+                self.state
+                    .snapshot
+                    .as_ref()
+                    .map(|s| s.workspace_name.clone())
+            })
             .unwrap_or_else(|| "未选择工作区".to_string());
 
         let any_running = self.state.bg_tasks.iter().any(|t| t.running) || self.state.verifying;
@@ -1106,12 +1187,7 @@ impl Render for Workbench {
                                 .child("Kanso"),
                         )
                         .child(div().text_color(muted).child("·"))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(muted)
-                                .child(ws_name),
-                        ),
+                        .child(div().text_size(px(12.0)).text_color(muted).child(ws_name)),
                 )
                 .child(
                     div()
@@ -1161,7 +1237,11 @@ impl Render for Workbench {
                                 .bg(sec)
                                 .text_size(px(11.0))
                                 .text_color(muted)
-                                .child(if any_running { "扫描校验中" } else { "引擎就绪" }),
+                                .child(if any_running {
+                                    "扫描校验中"
+                                } else {
+                                    "引擎就绪"
+                                }),
                         )
                         .child(
                             Button::new("open-workspace-btn")
@@ -1195,16 +1275,26 @@ impl Render for Workbench {
                 ),
         );
 
-        let main_content: AnyElement = if self.state.workspace.is_none() && self.state.snapshot.is_none() {
-            self.render_empty_workspace(cx)
-        } else {
-            match self.state.route {
-                Route::Overview => pages::overview::render_overview(&self.state, cx),
-                Route::Repos => pages::repos::render_repos(self, window, cx),
-                Route::Tasks => pages::tasks::render_tasks(&self.state, cx),
-                Route::CrossCommit | Route::Pipeline => {
-                    pages::placeholder::render_placeholder(self.state.route, cx)
-                }
+        let main_content = match self.state.route {
+            Route::Providers => pages::providers::render_providers(self, window, cx),
+            Route::Routing => pages::routing::render_routing(self, window, cx),
+            Route::Pricing => pages::pricing::render_pricing(self, window, cx),
+            Route::Usage => pages::usage::render_usage(self, window, cx),
+            Route::Settings => pages::settings::render_settings(self, window, cx),
+            Route::Overview
+            | Route::Repos
+            | Route::Tasks
+            | Route::CrossCommit
+            | Route::Pipeline
+                if self.state.workspace.is_none() && self.state.snapshot.is_none() =>
+            {
+                self.render_empty_workspace(cx)
+            }
+            Route::Overview => pages::overview::render_overview(&self.state, cx),
+            Route::Repos => pages::repos::render_repos(self, window, cx),
+            Route::Tasks => pages::tasks::render_tasks(&self.state, cx),
+            Route::CrossCommit | Route::Pipeline => {
+                pages::placeholder::render_placeholder(self.state.route, cx)
             }
         };
 
@@ -1258,7 +1348,13 @@ impl Render for Workbench {
                         ),
                 )
             })
-            .child(div().flex_1().w_full().overflow_hidden().child(main_content))
+            .child(
+                div()
+                    .flex_1()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(main_content),
+            )
             .when(self.state.bottom_open, |col| {
                 col.child(self.render_bottom_panel(cx))
             });
