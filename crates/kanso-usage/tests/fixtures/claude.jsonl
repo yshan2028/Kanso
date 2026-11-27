@@ -1,0 +1,11 @@
+{"type":"user","cwd":"/work/claude-project/","sessionId":"claude-session","message":{"usage":{"input_tokens":1000}}}
+{"type":"assistant","timestamp":"2026-11-26T08:00:00+08:00","requestId":"ignored-request","uuid":"ignored-uuid","message":{"id":"message-id","model":"claude-sonnet-test","usage":{"input_tokens":11,"cache_creation_input_tokens":12,"cache_read_input_tokens":13,"output_tokens":14,"output_tokens_details":{"thinking_tokens":3}}}}
+{"type":"assistant","timestamp":"2026-11-26T00:00:01Z","requestId":"api-error","uuid":"ignored-error-uuid","isApiErrorMessage":true,"message":{"id":"","model":"claude-sonnet-test","usage":{"output_tokens":2}}}
+{"type":"assistant","timestamp":"2026-11-26T00:00:02Z","requestId":"different-request","message":{"id":"message-id","usage":{"output_tokens":1000}}}
+{"type":"assistant","timestamp":"2026-11-26T00:00:03Z","requestId":"","uuid":"synthetic-error","message":{"model":"<synthetic>","usage":{"output_tokens":1}}}
+{"type":"assistant","timestamp":"2026-11-26T00:00:04Z","requestId":"api-error","message":{"usage":{"output_tokens":1000}}}
+{"type":"assistant","timestamp":"2026-11-26T00:00:05Z","uuid":"synthetic-error","message":{"usage":{"output_tokens":1000}}}
+{"type":"assistant","timestamp":"2026-11-25T23:59:59.999Z","message":{"id":"old-event","usage":{"output_tokens":1000}}}
+{"type":"assistant","message":{"id":"empty-usage","usage":{}}}
+{"type":"assistant","message":{"id":"null-usage","usage":null}}
+{"type":"assistant","message":{"id":"missing-timestamp","usage":{"output_tokens":3}}}
