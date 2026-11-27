@@ -728,12 +728,12 @@ mod tests {
 
         fs::write(
             root.join(".kanso.yaml"),
-            "trunk_branch: dev-Java\nignore_dirs:\n  - archive\n",
+            "trunk_branch: develop\nignore_dirs:\n  - archive\n",
         )
         .unwrap();
 
         let main_repo = root.join("core-service");
-        init_repo(&main_repo, "dev-Java");
+        init_repo(&main_repo, "develop");
 
         // Linked worktree placed under workspace root
         let wt_repo = root.join("core-service-wt");
@@ -743,14 +743,14 @@ mod tests {
                 "worktree",
                 "add",
                 "-b",
-                "java/jv-200-test",
+                "feat/demo-task",
                 wt_repo.to_str().unwrap(),
             ],
         );
 
         // Detached HEAD repo
         let detached_repo = root.join("detached-service");
-        init_repo(&detached_repo, "dev-Java");
+        init_repo(&detached_repo, "develop");
         git(&detached_repo, &["checkout", "--detach", "HEAD"]);
 
         // Ignored repo inside archive/
@@ -775,7 +775,7 @@ mod tests {
             .find(|r| r.name == "core-service-wt")
             .expect("worktree repo");
         assert!(wt.is_worktree);
-        assert_eq!(wt.trunk_branch.as_deref(), Some("dev-Java"));
+        assert_eq!(wt.trunk_branch.as_deref(), Some("develop"));
         assert_eq!(wt.worktrees.len(), 2);
 
         assert!(snapshot.alerts.iter().any(|a| {

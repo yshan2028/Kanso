@@ -384,9 +384,9 @@ mod tests {
         let ws_dir = dir.path().join("project");
         fs::create_dir_all(&ws_dir).unwrap();
         let ws = db
-            .add_workspace("nexus", ws_dir.to_str().unwrap(), Some("dev-Java"))
+            .add_workspace("demo-workspace", ws_dir.to_str().unwrap(), Some("develop"))
             .expect("add workspace");
-        assert_eq!(ws.default_trunk.as_deref(), Some("dev-Java"));
+        assert_eq!(ws.default_trunk.as_deref(), Some("develop"));
         assert_eq!(db.list_workspaces().unwrap().len(), 1);
 
         let updated = db

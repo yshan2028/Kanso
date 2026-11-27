@@ -1101,14 +1101,14 @@ mod tests {
     #[test]
     fn palette_fuzzy_matches_branch_and_prioritizes_recent() {
         let mut state = AppState::default();
-        let r1 = make_repo("gw", "gw", "java/jv-fix-identity", 0, false);
+        let r1 = make_repo("gw", "gw", "feat/fix-identity", 0, false);
         let r2 = make_repo("auth", "auth", "main", 0, true);
         state.snapshot = Some(make_snapshot(vec![r1, r2], Vec::new()));
 
-        let items = state.palette_items("jvfix");
+        let items = state.palette_items("fixid");
         assert!(
             items.iter().any(|i| i.id == "repo:/ws/gw"),
-            "jvfix should fuzzy-match java/jv-fix-identity"
+            "fixid should fuzzy-match feat/fix-identity"
         );
 
         state.record_palette_use("act:theme_dark");

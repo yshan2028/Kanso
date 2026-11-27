@@ -95,7 +95,7 @@ cargo test --workspace
 在工作区根目录或单仓根目录放置 `.kanso.yaml`：
 
 ```yaml
-trunk_branch: dev-Java
+trunk_branch: develop
 ignore_dirs:
   - archive
 pipelines:
