@@ -15,18 +15,6 @@ pub const ALL_POLICIES: [RolePolicy; 6] = [
     RolePolicy::Sticky,
 ];
 
-/// 读取路由策略键，未识别的值按默认的额度优先策略解释。
-pub fn parse_policy(s: &str) -> RolePolicy {
-    match s {
-        "Sequential" => RolePolicy::Sequential,
-        "RoundRobin" => RolePolicy::RoundRobin,
-        "Weighted" => RolePolicy::Weighted,
-        "SpeedFirst" => RolePolicy::SpeedFirst,
-        "Sticky" => RolePolicy::Sticky,
-        _ => RolePolicy::QuotaFirst,
-    }
-}
-
 /// 返回写入设置的路由策略键。
 pub fn policy_key(policy: RolePolicy) -> &'static str {
     match policy {
@@ -107,7 +95,7 @@ pub fn effective_preview(settings: &Settings) -> Vec<EffectiveEntry> {
     let defaults = Settings::default();
     let user = KansoConfig {
         routing_policy: (settings.routing_policy != defaults.routing_policy)
-            .then(|| settings.routing_policy.clone()),
+            .then(|| policy_key(settings.routing_policy).to_owned()),
         provider_order: (settings.provider_order != defaults.provider_order)
             .then(|| settings.provider_order.clone()),
         provider_disabled: (settings.provider_disabled != defaults.provider_disabled)
@@ -115,7 +103,7 @@ pub fn effective_preview(settings: &Settings) -> Vec<EffectiveEntry> {
         ..KansoConfig::default()
     };
     let builtin = KansoConfig {
-        routing_policy: Some(defaults.routing_policy),
+        routing_policy: Some(policy_key(defaults.routing_policy).to_owned()),
         provider_order: Some(defaults.provider_order),
         provider_disabled: Some(defaults.provider_disabled),
         ..KansoConfig::default()
@@ -141,12 +129,12 @@ mod tests {
         ];
         for (policy, key) in ALL_POLICIES.into_iter().zip(keys) {
             assert_eq!(policy_key(policy), key);
-            assert_eq!(parse_policy(key), policy);
+            assert_eq!(
+                serde_json::to_string(&policy).expect("序列化路由策略"),
+                format!("\"{key}\"")
+            );
         }
-        assert_eq!(
-            parse_policy(&Settings::default().routing_policy),
-            RolePolicy::QuotaFirst
-        );
+        assert_eq!(Settings::default().routing_policy, RolePolicy::QuotaFirst);
     }
 
     fn provider(id: &str, family: Family, calls: u64, errors: u64) -> ProviderEntry {

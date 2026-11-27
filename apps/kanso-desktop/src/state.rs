@@ -125,7 +125,7 @@ impl ThemeChoice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub theme: ThemeChoice,
@@ -137,7 +137,7 @@ pub struct Settings {
     pub provider_disabled: Vec<String>,
     /// 默认路由策略。
     #[serde(default = "Settings::default_routing_policy")]
-    pub routing_policy: String,
+    pub routing_policy: kanso_core::RolePolicy,
     /// 应用更新渠道。
     #[serde(default = "Settings::default_update_channel")]
     pub update_channel: String,
@@ -192,8 +192,8 @@ pub fn logs_dir() -> PathBuf {
 }
 
 impl Settings {
-    fn default_routing_policy() -> String {
-        "QuotaFirst".to_string()
+    fn default_routing_policy() -> kanso_core::RolePolicy {
+        kanso_core::RolePolicy::QuotaFirst
     }
 
     fn default_update_channel() -> String {

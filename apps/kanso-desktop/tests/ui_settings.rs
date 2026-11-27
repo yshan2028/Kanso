@@ -6,6 +6,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext, Window, WindowBounds,
     WindowOptions, px, size,
 };
+use kanso_core::RolePolicy;
 use kanso_desktop::{AppState, Route, Settings, SettingsSub, ThemeChoice, Workbench, bind_keys};
 use kanso_usage::{DesktopAppInfo, Family, PathKind, ToolVersion, UpdaterKind};
 use std::path::PathBuf;
@@ -104,21 +105,21 @@ fn routing_policy_updates_step_five_and_saves(cx: &mut TestAppContext) {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             assert_step_five(window, "额度优先");
-            for (key, label) in [
-                ("Sequential", "顺序分配"),
-                ("RoundRobin", "轮询"),
-                ("Weighted", "加权分配"),
-                ("SpeedFirst", "速度优先"),
-                ("Sticky", "固定供应商"),
-                ("QuotaFirst", "额度优先"),
+            for (policy, key, label) in [
+                (RolePolicy::Sequential, "Sequential", "顺序分配"),
+                (RolePolicy::RoundRobin, "RoundRobin", "轮询"),
+                (RolePolicy::Weighted, "Weighted", "加权分配"),
+                (RolePolicy::SpeedFirst, "SpeedFirst", "速度优先"),
+                (RolePolicy::Sticky, "Sticky", "固定供应商"),
+                (RolePolicy::QuotaFirst, "QuotaFirst", "额度优先"),
             ] {
                 let id = gpui_kit::SharedString::from(format!("routing-policy-{key}"));
                 assert_eq!(window.find(id.clone()).label(), Some(label));
                 window.click(id, cx);
                 window.render_frame(cx);
                 assert_step_five(window, label);
-                assert_eq!(workbench.read(cx).settings.routing_policy, key);
-                assert_eq!(Settings::load().routing_policy, key);
+                assert_eq!(workbench.read(cx).settings.routing_policy, policy);
+                assert_eq!(Settings::load().routing_policy, policy);
             }
         })
         .expect("验证路由策略交互");

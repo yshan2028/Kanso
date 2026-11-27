@@ -1,5 +1,5 @@
 use crate::Workbench;
-use crate::settings_view::{ALL_POLICIES, build_candidates, parse_policy, policy_key};
+use crate::settings_view::{ALL_POLICIES, build_candidates, policy_key};
 use gpui_kit::base::{Selectable as _, TestTextExt as _};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme, Sizable as _};
@@ -18,7 +18,7 @@ pub fn render_routing(
     _window: &mut Window,
     cx: &mut Context<Workbench>,
 ) -> AnyElement {
-    let policy = parse_policy(&this.settings.routing_policy);
+    let policy = this.settings.routing_policy;
     let policies = div()
         .flex()
         .flex_wrap()
@@ -35,7 +35,7 @@ pub fn render_routing(
             .label(option.label_zh())
             .on_click(cx.listener(move |this, _, _, cx| {
                 persist_settings(this, |settings| {
-                    settings.routing_policy = policy_key(option).to_owned();
+                    settings.routing_policy = option;
                 });
                 cx.notify();
             }))
