@@ -22,7 +22,15 @@ pub fn parse_claude_logs(root: &Path, cutoff_ms: i64) -> anyhow::Result<Vec<Usag
         let reader = BufReader::new(File::open(&path)?);
 
         for (index, line) in reader.split(b'\n').enumerate() {
-            let Ok(record) = serde_json::from_slice::<Value>(&line?) else {
+            let line = line?;
+            if let Ok(text) = std::str::from_utf8(&line)
+                && !text.contains("assistant")
+                && !text.contains("\"cwd\"")
+                && !text.contains("\"sessionId\"")
+            {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<Value>(&line) else {
                 continue;
             };
             if let Some(cwd) = nonempty_text(&record["cwd"]) {

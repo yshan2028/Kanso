@@ -160,6 +160,12 @@ impl Workbench {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
+        let ws_root = state.workspace.as_ref().map(|w| PathBuf::from(&w.root_path));
+        let (config_layers, config_error) = Self::load_config_layers(ws_root.as_deref());
+        state.config_layers = config_layers;
+        state.config_error = config_error;
+        state.usage_loading = started_at.is_some();
+
         let (engine_link, engine_task) = match engine {
             Some((link, rx)) => {
                 let task = Self::spawn_engine_listener(rx, cx);
@@ -189,6 +195,55 @@ impl Workbench {
         }
     }
 
+    fn load_config_layers(
+        workspace_root: Option<&Path>,
+    ) -> (
+        Vec<(kanso_config::ConfigLayer, kanso_config::KansoConfig)>,
+        Option<String>,
+    ) {
+        let mut layers = Vec::new();
+        let mut errors = Vec::new();
+
+        let mut candidates = Vec::new();
+        let user_path = kanso_config::user_config_path();
+        if !user_path.as_os_str().is_empty() {
+            candidates.push((kanso_config::ConfigLayer::User, user_path));
+        }
+        if let Some(root) = workspace_root {
+            candidates.push((
+                kanso_config::ConfigLayer::Repo,
+                root.join(".kanso/config.toml"),
+            ));
+        }
+
+        for (layer, path) in candidates {
+            match kanso_config::load_file(&path) {
+                Ok(cfg) => layers.push((layer, cfg)),
+                Err(err) => {
+                    if !matches!(
+                        err.downcast_ref::<kanso_config::ConfigError>(),
+                        Some(kanso_config::ConfigError::NotFound { .. })
+                    ) {
+                        errors.push(format!("{}：{err}", path.display()));
+                    }
+                }
+            }
+        }
+
+        let error = (!errors.is_empty()).then(|| errors.join("；"));
+        (layers, error)
+    }
+
+    pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
+        if self.started_at.is_none() {
+            return;
+        }
+        self.state.usage_loading = true;
+        self.state.usage_error = None;
+        self._usage_task = Some(Self::spawn_usage_collection(cx));
+        cx.notify();
+    }
+
     fn spawn_usage_collection(cx: &mut Context<Self>) -> Task<()> {
         use kanso_usage::{collect_snapshot, derive_providers, probe_desktop_app, probe_tools};
 
@@ -209,13 +264,23 @@ impl Workbench {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                this.state.usage_loading = false;
                 match usage {
                     Ok(snapshot) => {
-                        this.state.providers = derive_providers(&snapshot, &tools);
+                        let providers = derive_providers(&snapshot, &tools);
+                        tracing::info!(
+                            "KANSO_USAGE_LOADED requests={} errors={} providers={} quota={}",
+                            snapshot.total_requests,
+                            snapshot.total_errors,
+                            providers.len(),
+                            snapshot.quota.len()
+                        );
+                        this.state.providers = providers;
                         this.state.usage = Some(snapshot);
                         this.state.usage_error = None;
                     }
                     Err(err) => {
+                        tracing::warn!("KANSO_USAGE_LOAD_FAILED error={err}");
                         this.state.usage_error = Some(format!("采集用量失败：{err}"));
                     }
                 }
@@ -331,6 +396,10 @@ impl Workbench {
         self._engine_task = None;
 
         self.state.workspace = Some(ws_record.clone());
+        let (config_layers, config_error) =
+            Self::load_config_layers(Some(Path::new(&ws_record.root_path)));
+        self.state.config_layers = config_layers;
+        self.state.config_error = config_error;
         if let Some(snap) = cached_snap {
             self.state.selected = snap.repos.first().map(|r| r.path.clone());
             self.state.snapshot = Some(snap);

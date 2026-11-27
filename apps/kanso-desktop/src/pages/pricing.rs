@@ -1,8 +1,9 @@
 use crate::Workbench;
 use crate::provider_view::{ModelCostRow, aggregate_model_costs, family_label};
+use crate::settings_view::merged_prices;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
-use kanso_usage::{PriceEntry, builtin_price_table};
+use kanso_usage::PriceEntry;
 
 const PRICE_HEADERS: [&str; 6] = ["家族", "匹配规则", "输入", "缓存写入", "缓存读取", "输出"];
 const PRICE_WIDTHS: [f32; 6] = [86.0, 220.0, 86.0, 86.0, 86.0, 86.0];
@@ -15,7 +16,7 @@ pub fn render_pricing(
     _window: &mut Window,
     cx: &mut Context<Workbench>,
 ) -> AnyElement {
-    let prices = builtin_price_table();
+    let prices = merged_prices(&this.state.config_layers);
     let costs = this
         .state
         .usage

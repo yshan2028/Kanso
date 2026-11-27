@@ -114,18 +114,31 @@ fn render_config(this: &Workbench, cx: &App) -> AnyElement {
                     )
             },
         ));
-    let effective = effective_preview(&this.settings);
+    let effective = effective_preview(&this.settings, &this.state.config_layers);
     let table = section_card("生效配置", cx)
         .child(
             div()
                 .text_color(theme.muted_foreground)
                 .child("kanso config list --show-origin"),
         )
-        .child(
-            div()
-                .text_color(theme.muted_foreground)
-                .child("预览范围为内置默认与当前桌面用户设置。"),
-        )
+        .child(div().text_color(theme.muted_foreground).child(
+            "合并来源：内置默认、~/.kanso/config.toml、工作区 .kanso/config.toml 及桌面设置。",
+        ))
+        .when_some(this.state.config_error.clone(), |card, err| {
+            card.child(
+                div()
+                    .id("settings-config-error")
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.red)
+                    .bg(theme.secondary)
+                    .px_3()
+                    .py_2()
+                    .text_color(theme.red)
+                    .child(err)
+                    .test_support(),
+            )
+        })
         .child(
             div()
                 .flex()

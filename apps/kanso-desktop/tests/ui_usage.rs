@@ -222,6 +222,17 @@ fn usage_displays_calendar_quota_and_request_interactions(cx: &mut TestAppContex
         );
         assert!(shows_text(window, "1 条 · 50 条/页"));
         assert_eq!(window.find_all("usage-request-row").len(), 1);
+
+        assert!(window.find("usage-refresh").visible());
+        window.click("usage-refresh", cx);
+        window.render_frame(cx);
+
+        workbench.update(cx, |wb, cx| {
+            wb.state.usage_loading = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert_eq!(window.find("usage-refresh").label(), Some("刷新中..."));
     })
     .unwrap();
 }

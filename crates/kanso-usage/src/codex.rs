@@ -28,7 +28,15 @@ pub fn parse_codex_logs(
         let reader = BufReader::new(File::open(&path)?);
 
         for (index, line) in reader.split(b'\n').enumerate() {
-            let Ok(record) = serde_json::from_slice::<Value>(&line?) else {
+            let line = line?;
+            if let Ok(text) = std::str::from_utf8(&line)
+                && !text.contains("token_count")
+                && !text.contains("session_meta")
+                && !text.contains("turn_context")
+            {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<Value>(&line) else {
                 continue;
             };
             let payload = &record["payload"];

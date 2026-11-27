@@ -1,9 +1,10 @@
 //! 设置与路由页面所用的纯逻辑。
 
 use crate::Settings;
-use kanso_config::{ConfigLayer, EffectiveEntry, KansoConfig};
+use kanso_config::{ConfigLayer, EffectiveEntry, KansoConfig, PriceOverride};
 use kanso_core::{Candidate, RolePolicy};
-use kanso_usage::{Family, ProviderEntry, UsageSnapshot};
+use kanso_usage::{Family, PriceEntry, ProviderEntry, UsageSnapshot, builtin_price_table};
+use std::collections::BTreeMap;
 
 /// 策略选择器按此顺序展示全部路由策略。
 pub const ALL_POLICIES: [RolePolicy; 6] = [
@@ -90,8 +91,11 @@ fn quota_remaining(usage: Option<&UsageSnapshot>, family: &Family) -> Option<f64
         .reduce(f64::min)
 }
 
-/// 预览内置默认值与当前桌面用户改动合并后的配置来源。
-pub fn effective_preview(settings: &Settings) -> Vec<EffectiveEntry> {
+/// 预览各配置层与当前桌面用户改动合并后的生效配置及来源。
+pub fn effective_preview(
+    settings: &Settings,
+    extra_layers: &[(ConfigLayer, KansoConfig)],
+) -> Vec<EffectiveEntry> {
     let defaults = Settings::default();
     let user = KansoConfig {
         routing_policy: (settings.routing_policy != defaults.routing_policy)
@@ -109,7 +113,68 @@ pub fn effective_preview(settings: &Settings) -> Vec<EffectiveEntry> {
         ..KansoConfig::default()
     };
 
-    kanso_config::effective(&[(ConfigLayer::Builtin, builtin), (ConfigLayer::User, user)])
+    let mut layers = Vec::with_capacity(extra_layers.len() + 2);
+    layers.push((ConfigLayer::User, user));
+    layers.extend(extra_layers.iter().cloned());
+    layers.push((ConfigLayer::Builtin, builtin));
+    kanso_config::effective(&layers)
+}
+
+/// 按配置层优先级合并内置价格表与配置中的价格覆盖条目。
+pub fn merged_prices(extra_layers: &[(ConfigLayer, KansoConfig)]) -> Vec<PriceEntry> {
+    let mut sorted: Vec<_> = extra_layers.iter().collect();
+    sorted.sort_by_key(|(layer, _)| *layer);
+
+    let mut overrides: BTreeMap<String, PriceOverride> = BTreeMap::new();
+    for (_, cfg) in sorted {
+        if let Some(pricing) = &cfg.pricing {
+            for (pattern, price) in pricing {
+                overrides
+                    .entry(pattern.clone())
+                    .or_insert_with(|| price.clone());
+            }
+        }
+    }
+
+    let mut prices = builtin_price_table();
+    for entry in &mut prices {
+        if let Some(ov) = overrides.remove(&entry.pattern) {
+            entry.input = ov.input;
+            entry.cache_write = ov.cache_write;
+            entry.cache_read = ov.cache_read;
+            entry.output = ov.output;
+        }
+    }
+    for (pattern, ov) in overrides {
+        if let Some(family) = infer_family_from_pattern(&pattern) {
+            prices.push(PriceEntry {
+                family,
+                pattern,
+                input: ov.input,
+                cache_write: ov.cache_write,
+                cache_read: ov.cache_read,
+                output: ov.output,
+            });
+        }
+    }
+    prices
+}
+
+fn infer_family_from_pattern(pattern: &str) -> Option<Family> {
+    let lower = pattern.to_ascii_lowercase();
+    if lower.starts_with("claude") {
+        Some(Family::Anthropic)
+    } else if lower.starts_with("gpt")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("codex")
+    {
+        Some(Family::OpenAi)
+    } else if lower.starts_with("gemini") {
+        Some(Family::Google)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -222,5 +287,94 @@ mod tests {
             build_candidates(&providers, &settings, None)[0].quota_remaining_pct,
             None
         );
+    }
+
+    #[test]
+    fn effective_preview_merges_repo_user_and_builtin_layers() {
+        let settings = Settings {
+            routing_policy: RolePolicy::SpeedFirst,
+            ..Settings::default()
+        };
+        let repo_cfg = KansoConfig {
+            routing_policy: Some("RoundRobin".into()),
+            ..KansoConfig::default()
+        };
+        let user_toml = KansoConfig {
+            require_cross_family: Some(false),
+            ..KansoConfig::default()
+        };
+        let entries = effective_preview(
+            &settings,
+            &[
+                (ConfigLayer::User, user_toml),
+                (ConfigLayer::Repo, repo_cfg),
+            ],
+        );
+        let policy = entries
+            .iter()
+            .find(|e| e.key == "routing.worker.policy")
+            .expect("routing.worker.policy should exist");
+        assert_eq!(policy.value, "RoundRobin");
+        assert_eq!(policy.layer, ConfigLayer::Repo);
+
+        let cross = entries
+            .iter()
+            .find(|e| e.key == "routing.reviewer.require_cross_family")
+            .expect("require_cross_family should exist");
+        assert_eq!(cross.value, "false");
+        assert_eq!(cross.layer, ConfigLayer::User);
+    }
+
+    #[test]
+    fn merged_prices_applies_highest_priority_override_and_adds_gemini() {
+        let user = KansoConfig {
+            pricing: Some(BTreeMap::from([
+                (
+                    "claude-*".into(),
+                    PriceOverride {
+                        input: 4.0,
+                        cache_write: 5.0,
+                        cache_read: 0.4,
+                        output: 20.0,
+                    },
+                ),
+                (
+                    "gemini-*".into(),
+                    PriceOverride {
+                        input: 1.25,
+                        cache_write: 0.0,
+                        cache_read: 0.31,
+                        output: 5.0,
+                    },
+                ),
+            ])),
+            ..KansoConfig::default()
+        };
+        let repo = KansoConfig {
+            pricing: Some(BTreeMap::from([(
+                "claude-*".into(),
+                PriceOverride {
+                    input: 9.5,
+                    cache_write: 10.0,
+                    cache_read: 1.0,
+                    output: 30.0,
+                },
+            )])),
+            ..KansoConfig::default()
+        };
+        let merged = merged_prices(&[(ConfigLayer::User, user), (ConfigLayer::Repo, repo)]);
+        let claude = merged
+            .iter()
+            .find(|p| p.pattern == "claude-*")
+            .expect("claude-* entry");
+        assert_eq!(claude.input, 9.5);
+        assert_eq!(claude.output, 30.0);
+
+        let gemini = merged
+            .iter()
+            .find(|p| p.pattern == "gemini-*")
+            .expect("gemini-* entry");
+        assert_eq!(gemini.family, Family::Google);
+        assert_eq!(gemini.input, 1.25);
     }
 }

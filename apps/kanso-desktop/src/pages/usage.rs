@@ -70,24 +70,42 @@ pub fn render_usage(
                         .child(observed_text("用量")),
                 )
                 .child(
-                    pills(cx).children(
-                        [
-                            (UsageRange::Today, "usage-range-today", "今天"),
-                            (UsageRange::D7, "usage-range-7d", "7 天"),
-                            (UsageRange::D30, "usage-range-30d", "30 天"),
-                            (UsageRange::All, "usage-range-all", "全部"),
-                        ]
-                        .map(|(range, id, label)| {
-                            pill(id, label, state.usage_range == range).on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.state.usage_range = range;
-                                    this.state.usage_req_page = 0;
-                                    this.state.usage_hover_idx = None;
-                                    cx.notify();
-                                },
-                            ))
-                        }),
-                    ),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            pills(cx).children(
+                                [
+                                    (UsageRange::Today, "usage-range-today", "今天"),
+                                    (UsageRange::D7, "usage-range-7d", "7 天"),
+                                    (UsageRange::D30, "usage-range-30d", "30 天"),
+                                    (UsageRange::All, "usage-range-all", "全部"),
+                                ]
+                                .map(|(range, id, label)| {
+                                    pill(id, label, state.usage_range == range).on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.state.usage_range = range;
+                                            this.state.usage_req_page = 0;
+                                            this.state.usage_hover_idx = None;
+                                            cx.notify();
+                                        }),
+                                    )
+                                }),
+                            ),
+                        )
+                        .child(
+                            Button::new("usage-refresh")
+                                .small()
+                                .outline()
+                                .disabled(state.usage_loading)
+                                .label(if state.usage_loading {
+                                    "刷新中..."
+                                } else {
+                                    "刷新"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| this.refresh_usage(cx))),
+                        ),
                 ),
         )
         .child(

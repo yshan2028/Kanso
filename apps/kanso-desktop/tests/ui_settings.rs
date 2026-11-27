@@ -222,6 +222,14 @@ fn settings_tabs_show_updates_and_save_skipped_version(cx: &mut TestAppContext) 
                 assert_eq!(workbench.read(cx).state.settings_sub, SettingsSub::Config);
                 assert!(window.find("settings-config").visible());
                 assert!(window.try_find("settings-update").is_none());
+                assert!(window.try_find("settings-config-error").is_none());
+
+                workbench.update(cx, |wb, cx| {
+                    wb.state.config_error = Some("配置读取失败示例".into());
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                assert!(window.find("settings-config-error").visible());
             })
             .expect("验证设置页交互");
         },

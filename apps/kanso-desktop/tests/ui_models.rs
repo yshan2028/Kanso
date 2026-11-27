@@ -5,6 +5,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds,
     WindowOptions, px, size,
 };
+use kanso_config::{ConfigLayer, KansoConfig, PriceOverride};
 use kanso_desktop::pages::providers::ProviderSettingsPath;
 use kanso_desktop::{AppState, Route, Settings, ThemeChoice, Workbench, bind_keys};
 use kanso_usage::{
@@ -375,11 +376,33 @@ fn pricing_displays_builtin_prices_and_sorted_model_costs(cx: &mut TestAppContex
 
         wb.update(cx, |wb, cx| {
             wb.state.usage = None;
+            wb.state.config_layers = vec![(
+                ConfigLayer::Repo,
+                KansoConfig {
+                    pricing: Some(BTreeMap::from([(
+                        "claude-*".into(),
+                        PriceOverride {
+                            input: 9.9,
+                            cache_write: 3.75,
+                            cache_read: 0.3,
+                            output: 15.0,
+                        },
+                    )])),
+                    ..KansoConfig::default()
+                },
+            )];
             cx.notify();
         });
         window.render_frame(cx);
         assert!(window.try_find(("model-cost-row", 0usize)).is_none());
         assert!(window.try_find("model-costs-empty").is_some());
+        assert_eq!(
+            window
+                .within(("builtin-price-row", 0usize))
+                .find(("price-column", 2usize))
+                .label(),
+            Some("9.9")
+        );
     })
     .unwrap();
 }

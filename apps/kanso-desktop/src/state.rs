@@ -352,6 +352,12 @@ pub struct AppState {
     pub update_modal_open: bool,
     /// 页内操作提示文本。
     pub ui_notice: Option<String>,
+    /// 从配置文件读取到的配置层（用户级 / 仓库级）。
+    pub config_layers: Vec<(kanso_config::ConfigLayer, kanso_config::KansoConfig)>,
+    /// 读取配置文件失败时的错误信息。
+    pub config_error: Option<String>,
+    /// 是否正在后台采集用量数据。
+    pub usage_loading: bool,
 }
 
 impl Default for AppState {
@@ -387,6 +393,9 @@ impl Default for AppState {
             usage_hover_idx: None,
             update_modal_open: false,
             ui_notice: None,
+            config_layers: Vec::new(),
+            config_error: None,
+            usage_loading: false,
         }
     }
 }
