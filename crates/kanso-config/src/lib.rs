@@ -1,7 +1,8 @@
 //! Kanso 分层配置的共享契约。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 /// 配置来源，声明顺序从最高优先级到最低优先级。
 #[derive(
@@ -75,6 +76,65 @@ pub struct EffectiveEntry {
     pub layer: ConfigLayer,
 }
 
+/// 配置文件读取、写入或 TOML 转换时发生的错误。
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// 指定的配置文件不存在。
+    #[error("配置文件不存在 {path:?}")]
+    NotFound {
+        /// 缺失的配置文件路径。
+        path: PathBuf,
+        /// 底层文件读取错误。
+        #[source]
+        source: io::Error,
+    },
+    /// 无法读取指定的配置文件。
+    #[error("读取配置文件失败 {path:?}")]
+    Read {
+        /// 读取失败的配置文件路径。
+        path: PathBuf,
+        /// 底层文件读取错误。
+        #[source]
+        source: io::Error,
+    },
+    /// 无法创建配置文件的父目录。
+    #[error("创建配置目录失败 {path:?}")]
+    CreateDirectory {
+        /// 创建失败的目录路径。
+        path: PathBuf,
+        /// 底层目录创建错误。
+        #[source]
+        source: io::Error,
+    },
+    /// 无法写入指定的配置文件。
+    #[error("写入配置文件失败 {path:?}")]
+    Write {
+        /// 写入失败的配置文件路径。
+        path: PathBuf,
+        /// 底层文件写入错误。
+        #[source]
+        source: io::Error,
+    },
+    /// 配置文件中的 TOML 内容无法解析为配置。
+    #[error("解析 TOML 配置失败 {path:?}")]
+    Parse {
+        /// 解析失败的配置文件路径。
+        path: PathBuf,
+        /// 底层 TOML 解析错误。
+        #[source]
+        source: toml::de::Error,
+    },
+    /// 配置无法序列化为 TOML。
+    #[error("序列化 TOML 配置失败 {path:?}")]
+    Serialize {
+        /// 配置文件的目标路径。
+        path: PathBuf,
+        /// 底层 TOML 序列化错误。
+        #[source]
+        source: toml::ser::Error,
+    },
+}
+
 /// 返回用户主目录下的配置路径。无法确定主目录时返回空路径。
 pub fn user_config_path() -> PathBuf {
     dirs::home_dir()
@@ -83,17 +143,97 @@ pub fn user_config_path() -> PathBuf {
         .collect()
 }
 
-/// 加载指定配置文件，当前返回尚未接入读写的错误。
-pub fn load_file(_path: &Path) -> anyhow::Result<KansoConfig> {
-    anyhow::bail!("配置文件加载尚未实现")
+/// 加载指定的 TOML 配置文件，文件缺失时返回 [`ConfigError::NotFound`]。
+pub fn load_file(path: &Path) -> anyhow::Result<KansoConfig> {
+    let contents = fs::read_to_string(path).map_err(|source| {
+        let path = path.to_path_buf();
+        match source.kind() {
+            io::ErrorKind::NotFound => ConfigError::NotFound { path, source },
+            _ => ConfigError::Read { path, source },
+        }
+    })?;
+    let config = toml::from_str(&contents).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(config)
 }
 
-/// 保存用户配置，当前返回尚未接入读写的错误。
-pub fn save_user(_path: &Path, _cfg: &KansoConfig) -> anyhow::Result<()> {
-    anyhow::bail!("用户配置保存尚未实现")
+/// 创建缺失的父目录并以格式化的 TOML 覆盖目标配置文件。
+pub fn save_user(path: &Path, cfg: &KansoConfig) -> anyhow::Result<()> {
+    let contents = toml::to_string_pretty(cfg).map_err(|source| ConfigError::Serialize {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::CreateDirectory {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::write(path, contents).map_err(|source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
-/// 合并配置层，当前返回空的占位结果。
-pub fn effective(_layers: &[(ConfigLayer, KansoConfig)]) -> Vec<EffectiveEntry> {
-    Vec::new()
+/// 按优先级合并配置。同层取最先传入的已设置值，价格按模型规则分别合并。
+/// 返回的条目按来源层优先级排列。
+pub fn effective(layers: &[(ConfigLayer, KansoConfig)]) -> Vec<EffectiveEntry> {
+    let mut sorted_layers: Vec<_> = layers.iter().collect();
+    sorted_layers.sort_by_key(|(layer, _)| *layer);
+
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (layer, cfg) in sorted_layers {
+        let mut add_entry = |key: String, value: String| {
+            if seen.insert(key.clone()) {
+                entries.push(EffectiveEntry {
+                    key,
+                    value,
+                    layer: *layer,
+                });
+            }
+        };
+
+        let settings = [
+            ("routing.worker.policy", cfg.routing_policy.clone()),
+            (
+                "routing.reviewer.require_cross_family",
+                cfg.require_cross_family.map(|value| value.to_string()),
+            ),
+            (
+                "providers.order",
+                cfg.provider_order.as_ref().map(|values| values.join(", ")),
+            ),
+            (
+                "providers.disabled",
+                cfg.provider_disabled
+                    .as_ref()
+                    .map(|values| values.join(", ")),
+            ),
+        ];
+        for (key, value) in settings {
+            if let Some(value) = value {
+                add_entry(key.to_owned(), value);
+            }
+        }
+
+        if let Some(pricing) = &cfg.pricing {
+            for (pattern, price) in pricing {
+                add_entry(
+                    format!("pricing.{pattern}"),
+                    format!(
+                        "in=${} cw=${} cr=${} out=${}",
+                        price.input, price.cache_write, price.cache_read, price.output
+                    ),
+                );
+            }
+        }
+    }
+    entries
 }
